@@ -12,6 +12,10 @@ def test_tokenize_func_simple():
         " are": 1,
         " you": 1,
         "?": 1,
+        " regex": 2,
+        " youth": 2,
+        " fourth": 3,
+        " hollow": 1,
     }
 
     a = bytes("He", 'utf-8')
@@ -24,7 +28,7 @@ def test_tokenize_func_simple():
     print(d)
     print(list(d))
 
-    result = tokenize(tokens, 3)
+    result = tokenize(tokens, 5)
     print(result)
 
 

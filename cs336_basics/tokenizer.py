@@ -142,7 +142,7 @@ def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
             break
 
         cand_encoding_list = list(candidate_encoding.items())
-        cand_encoding_list.sort(key=lambda x: x[1])
+        cand_encoding_list.sort(reverse=True, key=lambda x: x[1])
         merge_candidate, merge_candidate_count = cand_encoding_list[0]
         log.info(f"merge_candidate {merge_candidate} count {merge_candidate_count}")
 
@@ -155,7 +155,7 @@ def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
             while i < len(bytes_tuple):
                 if i < len(bytes_tuple) - 1 and bytes_tuple[i] + bytes_tuple[i + 1] == merge_candidate:
                     new_bytes_list.append(merge_candidate)
-                    merged_tokens_cnt += 1
+                    merged_tokens_cnt += count
                     i += 2
                 else:
                     new_bytes_list.append(bytes_tuple[i])
