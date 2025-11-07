@@ -1,0 +1,18 @@
+version: 1
+formatters:
+  standard:
+    # Desired format: time, file name, line number, level, and message
+    format: '%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s'
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: standard
+    level: INFO # Set the handler to process INFO level and above
+    stream: ext://sys.stdout
+root:
+  handlers: [console]
+  level: INFO # Set the root logger to capture INFO level and above
+
+tokenizer:
+  level: DEBUG
+
