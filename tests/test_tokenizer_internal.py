@@ -42,6 +42,9 @@ def test_tokenize_func_simple():
     print(result)
 
 
+def test_word_count_simple():
+    pass
+
 # Define the path to your configuration file
 CONFIG_PATH = 'logging_config.yaml'
 

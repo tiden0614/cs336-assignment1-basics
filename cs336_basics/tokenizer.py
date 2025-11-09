@@ -1,10 +1,13 @@
 import logging
 import os
 import sys
+import regex as re
 from collections import defaultdict
 from typing import BinaryIO
 
 log = logging.getLogger("tokenizer")
+TOKEN_SPLIT_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+END_OF_TEXT_TOK = "<|endoftext|>"
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -56,7 +59,69 @@ def find_chunk_boundaries(
 # Given a portion of the file, tokenize it using a regex
 # and then put words into a counting dictionary
 async def word_count(file_name: str, start: int, end: int) -> dict[str, int]:
-    pass
+    log.info(f"Splitting {file_name}:{start}:{end} into word count dictionary")
+    LOAD_SIZE = 16 << 10 # 16KB
+    with open(file_name, "rb") as file:
+        file.seek(start)
+
+        # Algorithm:
+        # 1. We load LOAD_SIZE into memory and append to working_set 
+        #    (list of strings). We continue loading until the latest
+        #    mini_chunk contains a <|endoftext|> token.
+        # 2. Split the lastest mini_chunk by the last <|endoftext|>,
+        #    and append only the first part into the working_set.
+        # 3. Now the working_set contains N complete paragraphs, we
+        #    can start word counting on it.
+        # 4. Repeat 1 (remember to get the 2nd split from step 2),
+        #    until the file portion is exhausted.
+
+        loaded_size = 0
+        working_set: list[str] = [] # list of mini_chunks loaded so far
+        pre_split = None
+        chunks_loaded = 0
+        word_count_dict = defaultdict(int)
+        while loaded_size < end - start:
+            log.info(f"Loading {LOAD_SIZE}KB into memory")
+            mini_chunk = file.read(LOAD_SIZE)
+            chunks_loaded += 1
+            loaded_size += LOAD_SIZE
+
+            # If there were a previous split, prepend it into
+            # the mini_chunk.
+            if pre_split is not None:
+                mini_chunk = pre_split + mini_chunk
+                pre_split = None
+
+            if mini_chunk == b"":
+                # TODO: Log this
+                break
+                
+            found_at = mini_chunk.rfind(END_OF_TEXT_TOK)
+            if found_at == -1:
+                working_set.append(mini_chunk)
+                continue
+
+            # We have found a END_OF_TEXT_TOK from the loaded
+            # mini_chunk, now split it into 2
+            idx_of_first_char_after_tok = found_at + len(END_OF_TEXT_TOK)
+            working_set.append(mini_chunk[:idx_of_first_char_after_tok])
+            assert pre_split is None, f"Unprocessed {pre_split}"
+            pre_split = mini_chunk[idx_of_first_char_after_tok:]
+            log.info("Found mini_chunk containing END_OF_TEXT_TOK. "\
+                     "chunks_loaded=%d mini_chunk=%s found_at=%d pre_split=%s",
+                     chunks_loaded, mini_chunk, found_at, pre_split)
+            
+            to_word_count = "".join(working_set)
+            working_set.clear()
+
+            log.info(f"Starting to count words in to_word_count of size {len(to_word_count)}")
+            scanner = re.finditer(TOKEN_SPLIT_PAT, to_word_count)
+            for token in scanner:
+                word_count_dict[token] += 1
+        
+        log.info(f"Finished portion. loaded_size={loaded_size} chunks_loaded={chunks_loaded} "\
+                 f"tokens_count={len(word_count_dict)}")
+        return word_count_dict
 
 
 def initialize_merged_tokens(tokens: dict[str, int]) -> dict[tuple[bytes], int]:
@@ -82,12 +147,6 @@ def initialize_current_encoding() -> dict[bytes, int]:
     current_encoding = {i.to_bytes(1, 'big') : i for i in range(256)}
     current_encoding[bytes("<|endoftext|>", "utf-8")] = 256
     return current_encoding
-
-
-# def concat_byte_seq(seq1: bytes, seq2: bytes) -> bytes:
-#     concatenated = list(seq1) + list(seq2)
-
-
 
 
 def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
