@@ -142,7 +142,12 @@ def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
             break
 
         cand_encoding_list = list(candidate_encoding.items())
-        cand_encoding_list.sort(reverse=True, key=lambda x: x[1])
+
+        # Sorting: we want to get the most frequent pair. If there
+        # are two pairs whose frequencies are equal, break tie by
+        # selecting the lexicographically greater one.
+        cand_encoding_list.sort(reverse=True, key=lambda x: (x[1], x[0]))
+
         merge_candidate, merge_candidate_count = cand_encoding_list[0]
         log.info(f"merge_candidate {merge_candidate} count {merge_candidate_count}")
 

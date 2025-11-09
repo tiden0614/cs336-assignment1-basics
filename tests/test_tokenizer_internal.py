@@ -4,6 +4,16 @@ import logging.config
 import yaml
 import sys
 
+def test_example_in_pdf():
+    tokens = {
+        "low": 5,
+        "lower": 2,
+        "widest": 3,
+        "newest": 6,
+    }
+    result = tokenize(tokens, 6)
+    print(result)
+
 def test_tokenize_func_simple():
     tokens = {
         "Hello": 1,
@@ -65,7 +75,7 @@ def main():
     logger.warning("A warning occurred here.")
     logger.debug("This message should NOT appear because the level is set to INFO.")
 
-    test_tokenize_func_simple()
+    test_example_in_pdf()
 
 if __name__ == "__main__":
     main()
