@@ -1,4 +1,5 @@
-from cs336_basics.tokenizer import tokenize
+from cs336_basics.tokenizer import tokenize, pre_tokenize
+import asyncio
 import logging
 import logging.config
 import yaml
@@ -43,7 +44,14 @@ def test_tokenize_func_simple():
 
 
 def test_word_count_simple():
-    pass
+    test_file = "/home/ying-zhang/workplace/cs336/cs336-assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
+    result = asyncio.run(pre_tokenize(file_name=test_file, parallelism=4))
+    print(f"Got word count with {len(result)} entries")
+    result_sorted = [(count, word) for word, count in result.items()]
+    result_sorted.sort(reverse=True)
+    print(result_sorted[:10])
+
+
 
 # Define the path to your configuration file
 CONFIG_PATH = 'logging_config.yaml'
@@ -79,6 +87,8 @@ def main():
     logger.debug("This message should NOT appear because the level is set to INFO.")
 
     test_example_in_pdf()
+    test_word_count_simple()
+
 
 if __name__ == "__main__":
     main()

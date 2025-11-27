@@ -1,13 +1,16 @@
+import concurrent.futures
 import logging
 import os
 import sys
 import regex as re
+import asyncio
 from collections import defaultdict
 from typing import BinaryIO
 
 log = logging.getLogger("tokenizer")
 TOKEN_SPLIT_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 END_OF_TEXT_TOK = "<|endoftext|>"
+END_OF_TEXT_TOK_BYTES = END_OF_TEXT_TOK.encode('utf-8')
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -57,8 +60,12 @@ def find_chunk_boundaries(
 
 
 # Given a portion of the file, tokenize it using a regex
-# and then put words into a counting dictionary
-async def word_count(file_name: str, start: int, end: int) -> dict[str, int]:
+# and then put words into a counting dictionary.
+#
+# The overall algorithm is optimized towards keeping a limited working set
+# in-memory instead of loading the whole chunk at once. This way, we can
+# have many threads working concurrently without the heap memory exploding.
+def word_count(file_name: str, start: int, end: int) -> dict[str, int]:
     log.info(f"Splitting {file_name}:{start}:{end} into word count dictionary")
     LOAD_SIZE = 16 << 10 # 16KB
     with open(file_name, "rb") as file:
@@ -80,11 +87,13 @@ async def word_count(file_name: str, start: int, end: int) -> dict[str, int]:
         pre_split = None
         chunks_loaded = 0
         word_count_dict = defaultdict(int)
-        while loaded_size < end - start:
-            log.info(f"Loading {LOAD_SIZE}KB into memory")
-            mini_chunk = file.read(LOAD_SIZE)
+        total_load_size = end - start
+        while loaded_size < total_load_size:
+            load_size = min(LOAD_SIZE, total_load_size - loaded_size)
+            log.debug(f"Loading {load_size >> 10}KB into memory")
+            mini_chunk = file.read(load_size)
             chunks_loaded += 1
-            loaded_size += LOAD_SIZE
+            loaded_size += load_size
 
             # If there were a previous split, prepend it into
             # the mini_chunk.
@@ -93,10 +102,11 @@ async def word_count(file_name: str, start: int, end: int) -> dict[str, int]:
                 pre_split = None
 
             if mini_chunk == b"":
-                # TODO: Log this
+                log.info(f"Encountered EOF after loading {loaded_size}. Collected " \
+                         f"{len(word_count_dict)} word-freq pairs")
                 break
                 
-            found_at = mini_chunk.rfind(END_OF_TEXT_TOK)
+            found_at = mini_chunk.rfind(END_OF_TEXT_TOK_BYTES)
             if found_at == -1:
                 working_set.append(mini_chunk)
                 continue
@@ -104,24 +114,88 @@ async def word_count(file_name: str, start: int, end: int) -> dict[str, int]:
             # We have found a END_OF_TEXT_TOK from the loaded
             # mini_chunk, now split it into 2
             idx_of_first_char_after_tok = found_at + len(END_OF_TEXT_TOK)
-            working_set.append(mini_chunk[:idx_of_first_char_after_tok])
+            working_set.append(mini_chunk[:idx_of_first_char_after_tok].decode('utf-8'))
             assert pre_split is None, f"Unprocessed {pre_split}"
             pre_split = mini_chunk[idx_of_first_char_after_tok:]
-            log.info("Found mini_chunk containing END_OF_TEXT_TOK. "\
+            log.debug("Found mini_chunk containing END_OF_TEXT_TOK. "\
                      "chunks_loaded=%d mini_chunk=%s found_at=%d pre_split=%s",
                      chunks_loaded, mini_chunk, found_at, pre_split)
             
-            to_word_count = "".join(working_set)
+            to_word_count: str = "".join(working_set)
             working_set.clear()
 
-            log.info(f"Starting to count words in to_word_count of size {len(to_word_count)}")
+            log.debug(f"Starting to count words in to_word_count of size {len(to_word_count)}")
             scanner = re.finditer(TOKEN_SPLIT_PAT, to_word_count)
             for token in scanner:
-                word_count_dict[token] += 1
+                word_count_dict[token.group(0)] += 1
         
         log.info(f"Finished portion. loaded_size={loaded_size} chunks_loaded={chunks_loaded} "\
                  f"tokens_count={len(word_count_dict)}")
         return word_count_dict
+
+
+def validate_split_boundaries(parallelism: int, boundaries: list[int])-> list[tuple[int, int]]:
+    assert len(boundaries) > 0
+    assert len(boundaries) == parallelism + 1, (len(boundaries), parallelism)
+
+    result: list[tuple[int, int]] = []
+    for i in range(len(boundaries) - 1):
+        start = boundaries[i]
+        end = boundaries[i + 1]
+        assert start < end, f"Found invalid start end pair {start},{end} at {i} for {boundaries}"
+        result.append((start, end))
+    
+    assert parallelism == len(result)
+    return result
+
+
+# Glue code to convert a concurrent.futures.Future object 
+# into a coroutine so that we can use the nice async programming
+# constructs
+async def _await_concurrent_future(fut: concurrent.futures.Future):
+    return await asyncio.wrap_future(fut)
+
+
+async def pre_tokenize(file_name: str, parallelism: int) -> dict[str, int]:
+    # 1. find boundaries
+    # 2. for each boundary pair, assign a thread to do word count
+    # 3. wait for all threads to finish, and then merge all outputs
+
+    # Step 1: find boundaries
+    log.info(f"Splitting file {file_name} into {parallelism} chunks")
+    with open(file_name, "rb") as f:
+        boundaries = find_chunk_boundaries(f, parallelism, b"<|endoftext|>")
+    
+    # Double check the correctness of the split output
+    boundary_pairs = validate_split_boundaries(parallelism, boundaries)
+
+    log.info(f"Finished boundary probe. Got {len(boundary_pairs)} chunks.")
+
+    # Step 2: spin up async word count workers
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=parallelism) as executor:
+            loop = asyncio.get_running_loop()
+            tasks = []
+            async with asyncio.TaskGroup() as tg:
+                for start, end in boundary_pairs:
+                    fut = loop.run_in_executor(executor, word_count, file_name, start, end)
+                    task = tg.create_task(_await_concurrent_future(fut))
+                    tasks.append(task)
+    except Exception as e:
+        log.error(f"Encountered exception running async word count", e)
+        sys.exit(1)
+    log.info("All async word count threads have finished")
+    
+    # Step 3: merge into one word count dict
+    results = [task.result() for task in tasks]
+    # Clean up tasks otherwise it would keep up memory due to ref count
+    tasks.clear()
+    merged_word_count: dict[str, int] = defaultdict(int)
+    for word_count_dict in results:
+        for word, count in word_count_dict.items():
+            merged_word_count[word] += count
+
+    return merged_word_count
 
 
 def initialize_merged_tokens(tokens: dict[str, int]) -> dict[tuple[bytes], int]:
