@@ -156,7 +156,19 @@ async def _await_concurrent_future(fut: concurrent.futures.Future):
     return await asyncio.wrap_future(fut)
 
 
-async def pre_tokenize(file_name: str, parallelism: int) -> dict[str, int]:
+async def drive_concurrent_word_count(boundary_pairs: list[tuple[int, int]], file_name: str, parallelism: int) -> list[dict[str, int]]:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=parallelism) as executor:
+        loop = asyncio.get_running_loop()
+        tasks = []
+        async with asyncio.TaskGroup() as tg:
+            for start, end in boundary_pairs:
+                fut = loop.run_in_executor(executor, word_count, file_name, start, end)
+                task = tg.create_task(_await_concurrent_future(fut))
+                tasks.append(task)
+    
+    return [task.result() for task in tasks]
+
+def pre_tokenize(file_name: str, parallelism: int) -> dict[str, int]:
     # 1. find boundaries
     # 2. for each boundary pair, assign a thread to do word count
     # 3. wait for all threads to finish, and then merge all outputs
@@ -173,23 +185,13 @@ async def pre_tokenize(file_name: str, parallelism: int) -> dict[str, int]:
 
     # Step 2: spin up async word count workers
     try:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=parallelism) as executor:
-            loop = asyncio.get_running_loop()
-            tasks = []
-            async with asyncio.TaskGroup() as tg:
-                for start, end in boundary_pairs:
-                    fut = loop.run_in_executor(executor, word_count, file_name, start, end)
-                    task = tg.create_task(_await_concurrent_future(fut))
-                    tasks.append(task)
+        results = asyncio.run(drive_concurrent_word_count(boundary_pairs, file_name, parallelism))
     except Exception as e:
         log.error(f"Encountered exception running async word count", e)
         sys.exit(1)
     log.info("All async word count threads have finished")
     
     # Step 3: merge into one word count dict
-    results = [task.result() for task in tasks]
-    # Clean up tasks otherwise it would keep up memory due to ref count
-    tasks.clear()
     merged_word_count: dict[str, int] = defaultdict(int)
     for word_count_dict in results:
         for word, count in word_count_dict.items():
