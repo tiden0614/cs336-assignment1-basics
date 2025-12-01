@@ -12,8 +12,9 @@ def test_example_in_pdf():
         "widest": 3,
         "newest": 6,
     }
-    result = tokenize(tokens, 6)
-    print(result)
+    vocab, merges = tokenize(tokens, 6)
+    print(vocab)
+    print(merges)
 
 def test_tokenize_func_simple():
     tokens = {
@@ -39,8 +40,9 @@ def test_tokenize_func_simple():
     print(d)
     print(list(d))
 
-    result = tokenize(tokens, 5)
-    print(result)
+    vocab, merges = tokenize(tokens, 5)
+    print(vocab)
+    print(merges)
 
 
 def test_word_count_simple():
@@ -51,6 +53,13 @@ def test_word_count_simple():
     result_sorted.sort(reverse=True)
     print(result_sorted[:10])
 
+
+def inspect_test_train_bpe_special_tokens():
+    pkl_file = "/home/ying-zhang/workplace/cs336/cs336-assignment1-basics/tests/_snapshots/test_train_bpe_special_tokens.pkl"
+    import pickle
+    with open(pkl_file, 'rb') as f:
+        loaded_data = pickle.load(f)
+    print(loaded_data)
 
 
 # Define the path to your configuration file
@@ -88,6 +97,7 @@ def main():
 
     test_example_in_pdf()
     test_word_count_simple()
+    #inspect_test_train_bpe_special_tokens()
 
 
 if __name__ == "__main__":

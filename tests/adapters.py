@@ -9,6 +9,8 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
+import cs336_basics.tokenizer as bpe_tok
+
 
 def run_linear(
     d_in: int,
@@ -589,4 +591,8 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    word_count = bpe_tok.pre_tokenize(
+        file_name=input_path, parallelism=1, special_tokens=special_tokens)
+    passes = max(1, vocab_size - 256)
+    return bpe_tok.tokenize(word_count, passes)
+

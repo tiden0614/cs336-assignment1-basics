@@ -219,13 +219,13 @@ def initialize_merged_tokens(tokens: dict[str, int]) -> dict[tuple[bytes], int]:
     return merged_tokens
     
 
-def initialize_current_encoding() -> dict[bytes, int]:
-    current_encoding = {i.to_bytes(1, 'big') : i for i in range(256)}
-    current_encoding[bytes("<|endoftext|>", "utf-8")] = 256
+def initialize_current_encoding() -> dict[int, bytes]:
+    current_encoding = {i: i.to_bytes(1, 'big') for i in range(256)}
+    current_encoding[256] = bytes("<|endoftext|>", "utf-8")
     return current_encoding
 
 
-def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
+def tokenize(tokens: dict[str, int], passes: int) -> dict[bytes, int]:
     # merged_tokens stores the partially compressed
     # tokens corresonding to their count
     # e.g.
@@ -246,16 +246,18 @@ def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
     #   ...
     #   st: 233,
     # }
-    current_encoding: dict[bytes, int] = initialize_current_encoding()
+    current_encoding: dict[int, bytes] = initialize_current_encoding()
     next_encoding = len(current_encoding)
     log.debug(f"Initial current_encoding {current_encoding}")
+
+    merge_history: list[tuple[bytes, bytes]] = []
 
     for i in range(passes):
         log.info(f"Performing pass {i}. current_encoding_size {len(current_encoding)}")
 
         # candidate_encoding stores new encodings (that don't exist
         # in current_encoding) associate with the count they appear
-        candidate_encoding: dict[bytes, int] = defaultdict(int)
+        candidate_encoding: dict[tuple[bytes, bytes], int] = defaultdict(int)
 
         for bytes_tuple, count in merged_tokens.items():
             assert len(bytes_tuple) > 0, "empty byte tuple"
@@ -263,11 +265,10 @@ def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
             if len(bytes_tuple) == 1:
                 # when the whole bytes_tuple contains only one element, it must
                 # have already been merged into the current_encoding
-                assert bytes_tuple[0] in current_encoding.keys(), (bytes_tuple, current_encoding)
                 continue
 
             for i in range(len(bytes_tuple) - 1, 0, -1):
-                candidate_encoding[bytes_tuple[i - 1] + bytes_tuple[i]] += count
+                candidate_encoding[(bytes_tuple[i - 1], bytes_tuple[i])] += count
         
         # now we have collected all candidate encodings, sort them based on
         # the count and get the most frequent sequence
@@ -284,6 +285,7 @@ def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
         cand_encoding_list.sort(reverse=True, key=lambda x: (x[1], x[0]))
 
         merge_candidate, merge_candidate_count = cand_encoding_list[0]
+        merge_history.append(merge_candidate)
         log.info(f"merge_candidate {merge_candidate} count {merge_candidate_count}")
 
         next_merged_tokens: dict[tuple[bytes], int] = {}
@@ -293,8 +295,8 @@ def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
             new_bytes_list = []
             i = 0
             while i < len(bytes_tuple):
-                if i < len(bytes_tuple) - 1 and bytes_tuple[i] + bytes_tuple[i + 1] == merge_candidate:
-                    new_bytes_list.append(merge_candidate)
+                if i < len(bytes_tuple) - 1 and (bytes_tuple[i], bytes_tuple[i + 1]) == merge_candidate:
+                    new_bytes_list.append(bytes_tuple[i] + bytes_tuple[i + 1])
                     merged_tokens_cnt += count
                     i += 2
                 else:
@@ -305,11 +307,11 @@ def tokenize(tokens: dict[str, int], passes: int) -> list[bytes, int]:
         assert merged_tokens_cnt == merge_candidate_count, \
             f"Merge candidate {merge_candidate} merge candidate count {merge_candidate_count}, merged cnt {merged_tokens_cnt}"
         merged_tokens = next_merged_tokens
-        current_encoding[merge_candidate] = next_encoding
+        current_encoding[next_encoding] = merge_candidate[0] + merge_candidate[1]
         next_encoding += 1
         log.info(f"Completed merging {merge_candidate} into merged_tokens. Merged count {merged_tokens_cnt}.")
     
-    return list(current_encoding.items())
+    return current_encoding, merge_history
 
 
 if __name__ == "__main__":
