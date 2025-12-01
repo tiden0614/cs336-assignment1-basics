@@ -312,24 +312,3 @@ def tokenize(tokens: dict[str, int], passes: int) -> dict[bytes, int]:
         log.info(f"Completed merging {merge_candidate} into merged_tokens. Merged count {merged_tokens_cnt}.")
     
     return current_encoding, merge_history
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        log.warning("You need to specify the file to split")
-        sys.exit(1)
-    
-    input_file_name = sys.argv[1]
-    log.info(f"Splitting file {input_file_name}")
-    
-    with open(input_file_name, "rb") as f:
-        num_processes = 4
-        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
-
-        # The following is a serial implementation, but you can parallelize this
-        # by sending each start/end pair to a set of processes.
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            # Run pre-tokenization on your chunk and store the counts for each pre-token
-
