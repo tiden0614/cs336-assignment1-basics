@@ -65,8 +65,7 @@ def find_chunk_boundaries(
 # The overall algorithm is optimized towards keeping a limited working set
 # in-memory instead of loading the whole chunk at once. This way, we can
 # have many threads working concurrently without the heap memory exploding.
-def word_count(file_name: str, start: int, end: int) -> dict[str, int]:
-    log.info(f"Splitting {file_name}:{start}:{end} into word count dictionary")
+def word_count(file_name: str, start: int, end: int, special_token_pattern: bytes) -> dict[str, int]:
     LOAD_SIZE = 16 << 10 # 16KB
     with open(file_name, "rb") as file:
         file.seek(start)
@@ -101,25 +100,25 @@ def word_count(file_name: str, start: int, end: int) -> dict[str, int]:
                 mini_chunk = pre_split + mini_chunk
                 pre_split = None
 
-            if mini_chunk == b"":
+            if len(mini_chunk) == 0:
                 log.info(f"Encountered EOF after loading {loaded_size}. Collected " \
                          f"{len(word_count_dict)} word-freq pairs")
                 break
                 
-            found_at = mini_chunk.rfind(END_OF_TEXT_TOK_BYTES)
-            if found_at == -1:
-                working_set.append(mini_chunk)
+            found_at = re.search(special_token_pattern, mini_chunk)
+            if not found_at:
+                working_set.append(mini_chunk.decode('utf-8'))
                 continue
 
             # We have found a END_OF_TEXT_TOK from the loaded
             # mini_chunk, now split it into 2
-            idx_of_first_char_after_tok = found_at + len(END_OF_TEXT_TOK)
+            idx_of_first_char_after_tok = found_at.start() + len(found_at.group(0))
             working_set.append(mini_chunk[:idx_of_first_char_after_tok].decode('utf-8'))
             assert pre_split is None, f"Unprocessed {pre_split}"
             pre_split = mini_chunk[idx_of_first_char_after_tok:]
             log.debug("Found mini_chunk containing END_OF_TEXT_TOK. "\
-                     "chunks_loaded=%d mini_chunk=%s found_at=%d pre_split=%s",
-                     chunks_loaded, mini_chunk, found_at, pre_split)
+                     "chunks_loaded=%d mini_chunk=%s found_at=%d special_token=%s pre_split=%s",
+                     chunks_loaded, mini_chunk, found_at.start(), found_at.group(0), pre_split)
             
             to_word_count: str = "".join(working_set)
             working_set.clear()
@@ -156,22 +155,33 @@ async def _await_concurrent_future(fut: concurrent.futures.Future):
     return await asyncio.wrap_future(fut)
 
 
-async def drive_concurrent_word_count(boundary_pairs: list[tuple[int, int]], file_name: str, parallelism: int) -> list[dict[str, int]]:
+async def drive_concurrent_word_count(
+        boundary_pairs: list[tuple[int, int]], 
+        file_name: str, 
+        parallelism: int,
+        special_token_pattern: str) -> list[dict[str, int]]:
     with concurrent.futures.ProcessPoolExecutor(max_workers=parallelism) as executor:
         loop = asyncio.get_running_loop()
         tasks = []
         async with asyncio.TaskGroup() as tg:
             for start, end in boundary_pairs:
-                fut = loop.run_in_executor(executor, word_count, file_name, start, end)
+                fut = loop.run_in_executor(
+                    executor, word_count, file_name, start, end, special_token_pattern)
                 task = tg.create_task(_await_concurrent_future(fut))
                 tasks.append(task)
     
     return [task.result() for task in tasks]
 
-def pre_tokenize(file_name: str, parallelism: int) -> dict[str, int]:
+def pre_tokenize(file_name: str, parallelism: int, special_tokens: list[str]) -> dict[str, int]:
+    # 0. build special tokens regex
     # 1. find boundaries
     # 2. for each boundary pair, assign a thread to do word count
     # 3. wait for all threads to finish, and then merge all outputs
+
+    # Step 0: build special tokens regex
+    log.info(f"Received special tokens {special_tokens}")
+    special_tokens_pattern = "|".join(map(re.escape, special_tokens)).encode('utf-8')
+    log.info(f"Using special tokens pattern {special_tokens_pattern}")
 
     # Step 1: find boundaries
     log.info(f"Splitting file {file_name} into {parallelism} chunks")
@@ -185,7 +195,8 @@ def pre_tokenize(file_name: str, parallelism: int) -> dict[str, int]:
 
     # Step 2: spin up async word count workers
     try:
-        results = asyncio.run(drive_concurrent_word_count(boundary_pairs, file_name, parallelism))
+        results = asyncio.run(drive_concurrent_word_count(
+            boundary_pairs, file_name, parallelism, special_tokens_pattern))
     except Exception as e:
         log.error(f"Encountered exception running async word count", e)
         sys.exit(1)
@@ -201,17 +212,10 @@ def pre_tokenize(file_name: str, parallelism: int) -> dict[str, int]:
 
 
 def initialize_merged_tokens(tokens: dict[str, int]) -> dict[tuple[bytes], int]:
-    if "<|endoftext|>" not in tokens:
-        tokens["<|endoftext|>"] = 1
-
     merged_tokens = {}
     for token, count in tokens.items():
         if token == "":
             pass
-
-        if token == "<|endoftext|>":
-            merged_tokens[(bytes(token, 'utf-8'),)] = count
-            continue
 
         token_bytes_list = [bytes(c, 'utf-8') for c in token]
         merged_tokens[tuple(token_bytes_list)] = count
@@ -219,13 +223,16 @@ def initialize_merged_tokens(tokens: dict[str, int]) -> dict[tuple[bytes], int]:
     return merged_tokens
     
 
-def initialize_current_encoding() -> dict[int, bytes]:
-    current_encoding = {i: i.to_bytes(1, 'big') for i in range(256)}
-    current_encoding[256] = bytes("<|endoftext|>", "utf-8")
+def initialize_current_encoding(special_tokens: list[str]) -> dict[int, bytes]:
+    current_encoding = {}
+    for i in range(len(special_tokens)):
+        current_encoding[i] = special_tokens[i].encode('utf-8')
+    for i in range(256):
+        current_encoding[i + len(special_tokens)] = i.to_bytes(1, 'big')
     return current_encoding
 
 
-def tokenize(tokens: dict[str, int], passes: int) -> dict[bytes, int]:
+def tokenize(tokens: dict[str, int], passes: int, special_tokens: list[str]) -> dict[bytes, int]:
     # merged_tokens stores the partially compressed
     # tokens corresonding to their count
     # e.g.
@@ -246,7 +253,7 @@ def tokenize(tokens: dict[str, int], passes: int) -> dict[bytes, int]:
     #   ...
     #   st: 233,
     # }
-    current_encoding: dict[int, bytes] = initialize_current_encoding()
+    current_encoding: dict[int, bytes] = initialize_current_encoding(special_tokens)
     next_encoding = len(current_encoding)
     log.debug(f"Initial current_encoding {current_encoding}")
 

@@ -593,6 +593,6 @@ def run_train_bpe(
     """
     word_count = bpe_tok.pre_tokenize(
         file_name=input_path, parallelism=1, special_tokens=special_tokens)
-    passes = max(1, vocab_size - 256)
-    return bpe_tok.tokenize(word_count, passes)
+    passes = max(0, vocab_size - (len(special_tokens) + 256))
+    return bpe_tok.tokenize(word_count, passes, special_tokens)
 

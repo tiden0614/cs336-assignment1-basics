@@ -12,7 +12,7 @@ def test_example_in_pdf():
         "widest": 3,
         "newest": 6,
     }
-    vocab, merges = tokenize(tokens, 6)
+    vocab, merges = tokenize(tokens, 6, ["<|special_token_1|>", "<|special_token_2|>"])
     print(vocab)
     print(merges)
 
@@ -47,7 +47,7 @@ def test_tokenize_func_simple():
 
 def test_word_count_simple():
     test_file = "/home/ying-zhang/workplace/cs336/cs336-assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
-    result = pre_tokenize(file_name=test_file, parallelism=4)
+    result = pre_tokenize(file_name=test_file, parallelism=4, special_tokens=["<|endoftext|>", "<|test_special_token|>"])
     print(f"Got word count with {len(result)} entries")
     result_sorted = [(count, word) for word, count in result.items()]
     result_sorted.sort(reverse=True)
