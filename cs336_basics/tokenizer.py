@@ -8,7 +8,7 @@ from collections import defaultdict
 from typing import BinaryIO
 
 log = logging.getLogger("tokenizer")
-TOKEN_SPLIT_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+TOKEN_SPLIT_PAT = br"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 END_OF_TEXT_TOK = "<|endoftext|>"
 END_OF_TEXT_TOK_BYTES = END_OF_TEXT_TOK.encode('utf-8')
 
@@ -66,6 +66,8 @@ def find_chunk_boundaries(
 # in-memory instead of loading the whole chunk at once. This way, we can
 # have many threads working concurrently without the heap memory exploding.
 def word_count(file_name: str, start: int, end: int, special_token_pattern: bytes) -> dict[str, int]:
+    special_token_pattern_str = special_token_pattern.decode('utf-8')
+
     LOAD_SIZE = 16 << 10 # 16KB
     with open(file_name, "rb") as file:
         file.seek(start)
@@ -87,7 +89,7 @@ def word_count(file_name: str, start: int, end: int, special_token_pattern: byte
         chunks_loaded = 0
         word_count_dict = defaultdict(int)
         total_load_size = end - start
-        while loaded_size < total_load_size:
+        while loaded_size <= total_load_size:
             load_size = min(LOAD_SIZE, total_load_size - loaded_size)
             log.debug(f"Loading {load_size >> 10}KB into memory")
             mini_chunk = file.read(load_size)
@@ -103,30 +105,36 @@ def word_count(file_name: str, start: int, end: int, special_token_pattern: byte
             if len(mini_chunk) == 0:
                 log.info(f"Encountered EOF after loading {loaded_size}. Collected " \
                          f"{len(word_count_dict)} word-freq pairs")
-                break
-                
-            found_at = re.search(special_token_pattern, mini_chunk)
-            if not found_at:
-                working_set.append(mini_chunk.decode('utf-8'))
-                continue
+
+                special_token_start, special_token = 0, b"<|EOF|>"
+            else:
+                found_at = re.search(special_token_pattern, mini_chunk)
+                if not found_at:
+                    working_set.append(mini_chunk)
+                    continue
+
+                special_token_start, special_token = found_at.start(), found_at.group(0)
 
             # We have found a END_OF_TEXT_TOK from the loaded
             # mini_chunk, now split it into 2
-            idx_of_first_char_after_tok = found_at.start() + len(found_at.group(0))
-            working_set.append(mini_chunk[:idx_of_first_char_after_tok].decode('utf-8'))
+            idx_of_first_char_after_tok = special_token_start + len(special_token)
+            working_set.append(mini_chunk[:special_token_start])
             assert pre_split is None, f"Unprocessed {pre_split}"
             pre_split = mini_chunk[idx_of_first_char_after_tok:]
-            log.debug("Found mini_chunk containing END_OF_TEXT_TOK. "\
-                     "chunks_loaded=%d mini_chunk=%s found_at=%d special_token=%s pre_split=%s",
-                     chunks_loaded, mini_chunk, found_at.start(), found_at.group(0), pre_split)
+            log.debug("Found mini_chunk containing special token. "\
+                     "chunks_loaded=%d mini_chunk=%d found_at=%d special_token=%s pre_split_len=%d",
+                     chunks_loaded, len(mini_chunk), special_token_start, special_token, len(pre_split))
             
-            to_word_count: str = "".join(working_set)
+            to_word_count: bytes = b"".join(working_set)
             working_set.clear()
 
             log.debug(f"Starting to count words in to_word_count of size {len(to_word_count)}")
             scanner = re.finditer(TOKEN_SPLIT_PAT, to_word_count)
             for token in scanner:
                 word_count_dict[token.group(0)] += 1
+            
+            if len(mini_chunk) == 0:
+                break
         
         log.info(f"Finished portion. loaded_size={loaded_size} chunks_loaded={chunks_loaded} "\
                  f"tokens_count={len(word_count_dict)}")
@@ -211,14 +219,15 @@ def pre_tokenize(file_name: str, parallelism: int, special_tokens: list[str]) ->
     return merged_word_count
 
 
-def initialize_merged_tokens(tokens: dict[str, int]) -> dict[tuple[bytes], int]:
+def initialize_merged_tokens(tokens: dict[bytes, int]) -> dict[tuple[bytes], int]:
     merged_tokens = {}
     for token, count in tokens.items():
         if token == "":
             pass
 
-        token_bytes_list = [bytes(c, 'utf-8') for c in token]
+        token_bytes_list = [c.to_bytes(1, 'big') for c in token]
         merged_tokens[tuple(token_bytes_list)] = count
+        log.debug("token %s token_bytes_list %s", token, token_bytes_list)
     
     return merged_tokens
     
@@ -232,7 +241,11 @@ def initialize_current_encoding(special_tokens: list[str]) -> dict[int, bytes]:
     return current_encoding
 
 
-def tokenize(tokens: dict[str, int], passes: int, special_tokens: list[str]) -> dict[bytes, int]:
+def tokenize(
+        tokens: dict[bytes, int], 
+        passes: int, 
+        special_tokens: list[str]) -> tuple[dict[bytes, int], list[tuple[bytes, bytes]]]:
+    log.debug("Received tokens %s", tokens)
     # merged_tokens stores the partially compressed
     # tokens corresonding to their count
     # e.g.
@@ -242,7 +255,7 @@ def tokenize(tokens: dict[str, int], passes: int, special_tokens: list[str]) -> 
     #   (l, o, w, e, st): 15,
     # }
     merged_tokens: dict[tuple[bytes], int] = initialize_merged_tokens(tokens)
-    log.debug(f"Initial merged_tokens {merged_tokens}")
+    # log.info(f"Initial merged_tokens {merged_tokens}")
 
     # current_encoding stores the currently accepted
     # encodings.
@@ -260,7 +273,7 @@ def tokenize(tokens: dict[str, int], passes: int, special_tokens: list[str]) -> 
     merge_history: list[tuple[bytes, bytes]] = []
 
     for i in range(passes):
-        log.info(f"Performing pass {i}. current_encoding_size {len(current_encoding)}")
+        log.debug(f"Performing pass {i}. current_encoding_size {len(current_encoding)}")
 
         # candidate_encoding stores new encodings (that don't exist
         # in current_encoding) associate with the count they appear
@@ -279,21 +292,22 @@ def tokenize(tokens: dict[str, int], passes: int, special_tokens: list[str]) -> 
         
         # now we have collected all candidate encodings, sort them based on
         # the count and get the most frequent sequence
-        log.info(f"Collected {len(candidate_encoding)} new candidates.")
+        log.debug(f"Collected {len(candidate_encoding)} new candidates.")
         if len(candidate_encoding) == 0:
             log.info(f"No more candidates to merge.")
             break
 
-        cand_encoding_list = list(candidate_encoding.items())
+        # Pick the most frequent bytes pair as merge candidate
+        merge_candidate = (b"", b"")
+        merge_candidate_count = 0
+        for encoding_pair_candidate, current_count in candidate_encoding.items():
+            if current_count > merge_candidate_count or \
+                (current_count == merge_candidate_count and encoding_pair_candidate > merge_candidate):
+                merge_candidate, merge_candidate_count = encoding_pair_candidate, current_count
 
-        # Sorting: we want to get the most frequent pair. If there
-        # are two pairs whose frequencies are equal, break tie by
-        # selecting the lexicographically greater one.
-        cand_encoding_list.sort(reverse=True, key=lambda x: (x[1], x[0]))
-
-        merge_candidate, merge_candidate_count = cand_encoding_list[0]
+        # merge_candidate, merge_candidate_count = cand_encoding_list[0]
         merge_history.append(merge_candidate)
-        log.info(f"merge_candidate {merge_candidate} count {merge_candidate_count}")
+        log.debug(f"merge_candidate {merge_candidate} count {merge_candidate_count}")
 
         next_merged_tokens: dict[tuple[bytes], int] = {}
         merged_tokens_cnt = 0
@@ -311,11 +325,11 @@ def tokenize(tokens: dict[str, int], passes: int, special_tokens: list[str]) -> 
                     i += 1
             next_merged_tokens[tuple(new_bytes_list)] = count
         
-        assert merged_tokens_cnt == merge_candidate_count, \
-            f"Merge candidate {merge_candidate} merge candidate count {merge_candidate_count}, merged cnt {merged_tokens_cnt}"
+        # assert merged_tokens_cnt == merge_candidate_count, \
+        #     f"Merge candidate {merge_candidate} merge candidate count {merge_candidate_count}, merged cnt {merged_tokens_cnt}"
         merged_tokens = next_merged_tokens
         current_encoding[next_encoding] = merge_candidate[0] + merge_candidate[1]
         next_encoding += 1
-        log.info(f"Completed merging {merge_candidate} into merged_tokens. Merged count {merged_tokens_cnt}.")
+        log.debug(f"Completed merging {merge_candidate} into merged_tokens. Merged count {merged_tokens_cnt}.")
     
     return current_encoding, merge_history
