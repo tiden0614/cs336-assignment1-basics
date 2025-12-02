@@ -24,6 +24,9 @@ and the environment will be automatically solved and activated when necessary.
 
 ```sh
 uv run pytest
+
+# print logs at INFO level and output to a file
+clear && uv run pytest tests/test_train_bpe.py --log-cli-level=INFO -vv 2>&1 | tee test.log
 ```
 
 Initially, all tests should fail with `NotImplementedError`s.

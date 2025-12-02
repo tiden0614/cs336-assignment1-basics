@@ -143,7 +143,6 @@ def word_count(file_name: str, start: int, end: int, special_token_pattern: byte
 
 def validate_split_boundaries(parallelism: int, boundaries: list[int])-> list[tuple[int, int]]:
     assert len(boundaries) > 0
-    assert len(boundaries) == parallelism + 1, (len(boundaries), parallelism)
 
     result: list[tuple[int, int]] = []
     for i in range(len(boundaries) - 1):
@@ -152,7 +151,6 @@ def validate_split_boundaries(parallelism: int, boundaries: list[int])-> list[tu
         assert start < end, f"Found invalid start end pair {start},{end} at {i} for {boundaries}"
         result.append((start, end))
     
-    assert parallelism == len(result)
     return result
 
 
@@ -198,6 +196,7 @@ def pre_tokenize(file_name: str, parallelism: int, special_tokens: list[str]) ->
     
     # Double check the correctness of the split output
     boundary_pairs = validate_split_boundaries(parallelism, boundaries)
+    parallelism = len(boundary_pairs)
 
     log.info(f"Finished boundary probe. Got {len(boundary_pairs)} chunks.")
 
