@@ -66,9 +66,9 @@ def find_chunk_boundaries(
 # in-memory instead of loading the whole chunk at once. This way, we can
 # have many threads working concurrently without the heap memory exploding.
 def word_count(file_name: str, start: int, end: int, special_token_pattern: bytes) -> dict[str, int]:
-    special_token_pattern_str = special_token_pattern.decode('utf-8')
+    log.info(f"Starting to count tokens for file {file_name} start {start} end {end}")
 
-    LOAD_SIZE = 16 << 10 # 16KB
+    LOAD_SIZE = 512 << 10 # 512KB
     with open(file_name, "rb") as file:
         file.seek(start)
 
@@ -90,6 +90,10 @@ def word_count(file_name: str, start: int, end: int, special_token_pattern: byte
         word_count_dict = defaultdict(int)
         total_load_size = end - start
         while loaded_size <= total_load_size:
+            if chunks_loaded % 100 == 0:
+                log.info(f"Loaded {chunks_loaded} chunks ({loaded_size >> 10}KB). "
+                         f"Current word count size {len(word_count_dict)}")
+
             load_size = min(LOAD_SIZE, total_load_size - loaded_size)
             log.debug(f"Loading {load_size >> 10}KB into memory")
             mini_chunk = file.read(load_size)
@@ -102,7 +106,7 @@ def word_count(file_name: str, start: int, end: int, special_token_pattern: byte
                 mini_chunk = pre_split + mini_chunk
                 pre_split = None
 
-            if len(mini_chunk) == 0:
+            if len(mini_chunk) == 0 or loaded_size >= total_load_size:
                 log.info(f"Encountered EOF after loading {loaded_size}. Collected " \
                          f"{len(word_count_dict)} word-freq pairs")
 
@@ -133,7 +137,7 @@ def word_count(file_name: str, start: int, end: int, special_token_pattern: byte
             for token in scanner:
                 word_count_dict[token.group(0)] += 1
             
-            if len(mini_chunk) == 0:
+            if len(mini_chunk) == 0 or loaded_size >= total_load_size:
                 break
         
         log.info(f"Finished portion. loaded_size={loaded_size} chunks_loaded={chunks_loaded} "\
@@ -272,7 +276,8 @@ def tokenize(
     merge_history: list[tuple[bytes, bytes]] = []
 
     for i in range(passes):
-        log.debug(f"Performing pass {i}. current_encoding_size {len(current_encoding)}")
+        if i % 200 == 0:
+            log.info(f"Performing pass {i}. current_encoding_size {len(current_encoding)}")
 
         # candidate_encoding stores new encodings (that don't exist
         # in current_encoding) associate with the count they appear
@@ -331,4 +336,5 @@ def tokenize(
         next_encoding += 1
         log.debug(f"Completed merging {merge_candidate} into merged_tokens. Merged count {merged_tokens_cnt}.")
     
+    log.info(f"Finished training bpe. Vocab size {len(current_encoding)}")
     return current_encoding, merge_history

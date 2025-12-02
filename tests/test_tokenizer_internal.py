@@ -1,5 +1,5 @@
 from cs336_basics.tokenizer import tokenize, pre_tokenize
-import asyncio
+import adapters
 import logging
 import logging.config
 import yaml
@@ -46,12 +46,12 @@ def test_tokenize_func_simple():
 
 
 def test_word_count_simple():
-    test_file = "/home/ying-zhang/workplace/cs336/cs336-assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
-    result = pre_tokenize(file_name=test_file, parallelism=4, special_tokens=["<|endoftext|>", "<|test_special_token|>"])
-    print(f"Got word count with {len(result)} entries")
-    result_sorted = [(count, word) for word, count in result.items()]
+    test_file = "/home/ying-zhang/workplace/cs336/cs336-assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
+    vocab, merge_history = adapters.run_train_bpe(test_file, 10000, special_tokens=["<|endoftext|>"])
+    print(f"Got word count with {len(vocab)} entries")
+    result_sorted = [(count, word) for word, count in vocab.items()]
     result_sorted.sort(reverse=True)
-    print(result_sorted[:10])
+    print(result_sorted[:200])
 
 
 def inspect_test_train_bpe_special_tokens():
@@ -95,7 +95,7 @@ def main():
     logger.warning("A warning occurred here.")
     logger.debug("This message should NOT appear because the level is set to INFO.")
 
-    test_example_in_pdf()
+    # test_example_in_pdf()
     test_word_count_simple()
     #inspect_test_train_bpe_special_tokens()
 

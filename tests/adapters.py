@@ -592,7 +592,7 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
     word_count = bpe_tok.pre_tokenize(
-        file_name=input_path, parallelism=4, special_tokens=special_tokens)
+        file_name=input_path, parallelism=8, special_tokens=special_tokens)
     passes = max(0, vocab_size - (len(special_tokens) + 256))
     return bpe_tok.tokenize(word_count, passes, special_tokens)
 
