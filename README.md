@@ -27,6 +27,8 @@ uv run pytest
 
 # print logs at INFO level and output to a file
 clear && uv run pytest tests/test_train_bpe.py --log-cli-level=INFO -vv 2>&1 | tee test.log
+
+clear && uv run pytest tests/test_tokenizer_internal.py --log-cli-level=INFO -vv
 ```
 
 Initially, all tests should fail with `NotImplementedError`s.

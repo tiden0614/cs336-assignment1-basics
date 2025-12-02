@@ -5,7 +5,7 @@ import sys
 import regex as re
 import asyncio
 from collections import defaultdict
-from typing import BinaryIO
+from typing import BinaryIO, Generator
 
 log = logging.getLogger("tokenizer")
 TOKEN_SPLIT_PAT = br"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -66,6 +66,14 @@ def find_chunk_boundaries(
 # in-memory instead of loading the whole chunk at once. This way, we can
 # have many threads working concurrently without the heap memory exploding.
 def word_count(file_name: str, start: int, end: int, special_token_pattern: bytes) -> dict[str, int]:
+    freq = defaultdict(int)
+    for token in produce_tokens(file_name, start, end, special_token_pattern):
+        freq[token] += 1
+    return freq
+
+
+def produce_tokens(
+        file_name: str, start: int, end: int, special_token_pattern: bytes) -> Generator[str, None, None]:
     log.info(f"Starting to count tokens for file {file_name} start {start} end {end}")
 
     LOAD_SIZE = 512 << 10 # 512KB
@@ -85,64 +93,60 @@ def word_count(file_name: str, start: int, end: int, special_token_pattern: byte
 
         loaded_size = 0
         working_set: list[str] = [] # list of mini_chunks loaded so far
-        pre_split = None
         chunks_loaded = 0
-        word_count_dict = defaultdict(int)
+        token_count = 0
         total_load_size = end - start
-        while loaded_size <= total_load_size:
+
+        def working_set_size():
+            return sum(map(len, working_set))
+
+        while loaded_size < total_load_size or working_set_size() != 0:
             if chunks_loaded % 100 == 0:
                 log.info(f"Loaded {chunks_loaded} chunks ({loaded_size >> 10}KB). "
-                         f"Current word count size {len(word_count_dict)}")
+                         f"Current token count {token_count}")
 
             load_size = min(LOAD_SIZE, total_load_size - loaded_size)
             log.debug(f"Loading {load_size >> 10}KB into memory")
-            mini_chunk = file.read(load_size)
-            chunks_loaded += 1
-            loaded_size += load_size
+            mini_chunk = b""
+            if loaded_size < total_load_size:
+                mini_chunk = file.read(load_size)
+                chunks_loaded += 1
+                loaded_size += load_size
 
-            # If there were a previous split, prepend it into
-            # the mini_chunk.
-            if pre_split is not None:
-                mini_chunk = pre_split + mini_chunk
-                pre_split = None
+            pre_split = None
 
-            if len(mini_chunk) == 0 or loaded_size >= total_load_size:
-                log.info(f"Encountered EOF after loading {loaded_size}. Collected " \
-                         f"{len(word_count_dict)} word-freq pairs")
+            found_at = re.search(special_token_pattern, mini_chunk)
+            if found_at:
+                special_token_start, special_token = found_at.start(), found_at.group(0)
+                log.debug("Found mini_chunk containing special token. "\
+                        "chunks_loaded=%d mini_chunk=%d found_at=%d special_token=%s",
+                        chunks_loaded, len(mini_chunk), special_token_start, special_token)
 
-                special_token_start, special_token = 0, b"<|EOF|>"
+                idx_of_first_char_after_tok = special_token_start + len(special_token)
+                pre_split = mini_chunk[idx_of_first_char_after_tok:]
+                working_set.append(mini_chunk[:special_token_start])
+                log.debug("Splitting mini_chunk %d, %d, %d", len(mini_chunk), special_token_start, len(pre_split))
             else:
-                found_at = re.search(special_token_pattern, mini_chunk)
-                if not found_at:
-                    working_set.append(mini_chunk)
+                working_set.append(mini_chunk)
+                if loaded_size < total_load_size:
+                    log.debug("Special token not found. Appending to working set and continue to load.")
                     continue
 
-                special_token_start, special_token = found_at.start(), found_at.group(0)
-
-            # We have found a END_OF_TEXT_TOK from the loaded
-            # mini_chunk, now split it into 2
-            idx_of_first_char_after_tok = special_token_start + len(special_token)
-            working_set.append(mini_chunk[:special_token_start])
-            assert pre_split is None, f"Unprocessed {pre_split}"
-            pre_split = mini_chunk[idx_of_first_char_after_tok:]
-            log.debug("Found mini_chunk containing special token. "\
-                     "chunks_loaded=%d mini_chunk=%d found_at=%d special_token=%s pre_split_len=%d",
-                     chunks_loaded, len(mini_chunk), special_token_start, special_token, len(pre_split))
-            
             to_word_count: bytes = b"".join(working_set)
             working_set.clear()
-
-            log.debug(f"Starting to count words in to_word_count of size {len(to_word_count)}")
-            scanner = re.finditer(TOKEN_SPLIT_PAT, to_word_count)
-            for token in scanner:
-                word_count_dict[token.group(0)] += 1
             
-            if len(mini_chunk) == 0 or loaded_size >= total_load_size:
-                break
+            paragraphs = re.split(special_token_pattern, to_word_count)
+            for paragraph in paragraphs: 
+                scanner = re.finditer(TOKEN_SPLIT_PAT, paragraph)
+                for token in scanner:
+                    token_count += 1
+                    yield token.group(0)
+            
+            if pre_split is not None:
+                working_set.append(pre_split)
         
         log.info(f"Finished portion. loaded_size={loaded_size} chunks_loaded={chunks_loaded} "\
-                 f"tokens_count={len(word_count_dict)}")
-        return word_count_dict
+                 f"tokens_count={token_count}")
 
 
 def validate_split_boundaries(parallelism: int, boundaries: list[int])-> list[tuple[int, int]]:
@@ -244,7 +248,7 @@ def initialize_current_encoding(special_tokens: list[str]) -> dict[int, bytes]:
     return current_encoding
 
 
-def tokenize(
+def learn_merges(
         tokens: dict[bytes, int], 
         passes: int, 
         special_tokens: list[str]) -> tuple[dict[bytes, int], list[tuple[bytes, bytes]]]:
@@ -258,7 +262,7 @@ def tokenize(
     #   (l, o, w, e, st): 15,
     # }
     merged_tokens: dict[tuple[bytes], int] = initialize_merged_tokens(tokens)
-    # log.info(f"Initial merged_tokens {merged_tokens}")
+    log.debug("Initial merged_tokens %s", merged_tokens)
 
     # current_encoding stores the currently accepted
     # encodings.
@@ -271,7 +275,7 @@ def tokenize(
     # }
     current_encoding: dict[int, bytes] = initialize_current_encoding(special_tokens)
     next_encoding = len(current_encoding)
-    log.debug(f"Initial current_encoding {current_encoding}")
+    log.debug("Initial current_encoding %s", current_encoding)
 
     merge_history: list[tuple[bytes, bytes]] = []
 
