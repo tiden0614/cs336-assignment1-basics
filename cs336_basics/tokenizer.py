@@ -101,7 +101,7 @@ def produce_tokens(
             return sum(map(len, working_set))
 
         while loaded_size < total_load_size or working_set_size() != 0:
-            if chunks_loaded % 100 == 0:
+            if chunks_loaded > 0 and chunks_loaded % 100 == 0:
                 log.info(f"Loaded {chunks_loaded} chunks ({loaded_size >> 10}KB). "
                          f"Current token count {token_count}")
 
@@ -248,6 +248,36 @@ def initialize_current_encoding(special_tokens: list[str]) -> dict[int, bytes]:
     return current_encoding
 
 
+def get_bytes_pair(token_sig):
+    for i in range(len(token_sig) - 1):
+        yield token_sig[i], token_sig[i + 1]
+
+
+def initialize_merged_token_idx(
+        merged_tokens: dict[tuple[bytes], int]) -> dict[tuple[bytes, bytes], set[tuple[bytes]]]:
+    merged_tokens_idx = defaultdict(set)
+
+    for token_sig in merged_tokens.keys():
+        for b1, b2 in get_bytes_pair(token_sig):
+            merged_tokens_idx[(b1, b2)].add(token_sig)
+
+    return merged_tokens_idx
+
+
+def merge_bytes_pair_for_token(token: tuple[bytes], merge_candidate: tuple[bytes, bytes]) -> tuple[bytes]:
+    new_token_sig_list = []
+    i = 0
+    while i < len(token):
+        if i < len(token) - 1 and (token[i], token[i + 1]) == merge_candidate:
+            new_token_sig_list.append(token[i] + token[i + 1])
+            i += 2
+        else:
+            new_token_sig_list.append(token[i])
+            i += 1
+    
+    return tuple(new_token_sig_list)
+
+
 def learn_merges(
         tokens: dict[bytes, int], 
         passes: int, 
@@ -262,6 +292,8 @@ def learn_merges(
     #   (l, o, w, e, st): 15,
     # }
     merged_tokens: dict[tuple[bytes], int] = initialize_merged_tokens(tokens)
+    merged_tokens_idx: dict[tuple[bytes, bytes], set[tuple[bytes]]] = \
+        initialize_merged_token_idx(merged_tokens)
     log.debug("Initial merged_tokens %s", merged_tokens)
 
     # current_encoding stores the currently accepted
@@ -280,7 +312,7 @@ def learn_merges(
     merge_history: list[tuple[bytes, bytes]] = []
 
     for i in range(passes):
-        if i % 200 == 0:
+        if i > 0 and i % 200 == 0:
             log.info(f"Performing pass {i}. current_encoding_size {len(current_encoding)}")
 
         # candidate_encoding stores new encodings (that don't exist
@@ -313,29 +345,39 @@ def learn_merges(
                 (current_count == merge_candidate_count and encoding_pair_candidate > merge_candidate):
                 merge_candidate, merge_candidate_count = encoding_pair_candidate, current_count
 
-        # merge_candidate, merge_candidate_count = cand_encoding_list[0]
         merge_history.append(merge_candidate)
         log.debug(f"merge_candidate {merge_candidate} count {merge_candidate_count}")
 
-        next_merged_tokens: dict[tuple[bytes], int] = {}
         merged_tokens_cnt = 0
 
-        for bytes_tuple, count in merged_tokens.items():
-            new_bytes_list = []
-            i = 0
-            while i < len(bytes_tuple):
-                if i < len(bytes_tuple) - 1 and (bytes_tuple[i], bytes_tuple[i + 1]) == merge_candidate:
-                    new_bytes_list.append(bytes_tuple[i] + bytes_tuple[i + 1])
-                    merged_tokens_cnt += count
-                    i += 2
-                else:
-                    new_bytes_list.append(bytes_tuple[i])
-                    i += 1
-            next_merged_tokens[tuple(new_bytes_list)] = count
-        
-        # assert merged_tokens_cnt == merge_candidate_count, \
-        #     f"Merge candidate {merge_candidate} merge candidate count {merge_candidate_count}, merged cnt {merged_tokens_cnt}"
-        merged_tokens = next_merged_tokens
+        # Merge:
+        # 1. look up merge_tokens_idx and find relevant tokens to modify
+        # 2. get the new_token_sig by merging bytes together
+        # 3. replace the old_token_sig with new_token_sig
+        # 4. remove idx references to old_token_sig
+        # 5. add idx references to new_token_sig
+
+        # We need the copy here because we are going to mutate the idx entry
+        relevant_merge_tokens: set[tuple[bytes]] = merged_tokens_idx[merge_candidate].copy()
+
+        for old_token_sig in relevant_merge_tokens:
+            new_token_sig = merge_bytes_pair_for_token(old_token_sig, merge_candidate)
+            
+            # replace old_token_sig in merged_tokens
+            assert new_token_sig not in merged_tokens, (new_token_sig, merged_tokens)
+            merged_tokens[new_token_sig] = merged_tokens[old_token_sig]
+            del merged_tokens[old_token_sig]
+
+            # remove idx references to any byte pairs in the old_token_sig
+            for b1, b2 in get_bytes_pair(old_token_sig):
+                merged_tokens_idx[(b1, b2)].discard(old_token_sig)
+            
+            # add idx references to any byte pairs in the new_token_sig
+            for b1, b2 in get_bytes_pair(new_token_sig):
+                merged_tokens_idx[(b1, b2)].add(new_token_sig)
+            
+            merged_tokens_cnt += 1
+
         current_encoding[next_encoding] = merge_candidate[0] + merge_candidate[1]
         next_encoding += 1
         log.debug(f"Completed merging {merge_candidate} into merged_tokens. Merged count {merged_tokens_cnt}.")
