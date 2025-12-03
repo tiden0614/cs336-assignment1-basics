@@ -106,7 +106,7 @@ def produce_tokens(
                          f"Current token count {token_count}")
 
             load_size = min(LOAD_SIZE, total_load_size - loaded_size)
-            log.debug(f"Loading {load_size >> 10}KB into memory")
+            log.debug("Loading %dMB into memory", loaded_size >> 20)
             mini_chunk = b""
             if loaded_size < total_load_size:
                 mini_chunk = file.read(load_size)
@@ -332,7 +332,6 @@ def learn_merges(
         
         # now we have collected all candidate encodings, sort them based on
         # the count and get the most frequent sequence
-        log.debug(f"Collected {len(candidate_encoding)} new candidates.")
         if len(candidate_encoding) == 0:
             log.info(f"No more candidates to merge.")
             break
@@ -346,7 +345,6 @@ def learn_merges(
                 merge_candidate, merge_candidate_count = encoding_pair_candidate, current_count
 
         merge_history.append(merge_candidate)
-        log.debug(f"merge_candidate {merge_candidate} count {merge_candidate_count}")
 
         merged_tokens_cnt = 0
 
@@ -380,7 +378,6 @@ def learn_merges(
 
         current_encoding[next_encoding] = merge_candidate[0] + merge_candidate[1]
         next_encoding += 1
-        log.debug(f"Completed merging {merge_candidate} into merged_tokens. Merged count {merged_tokens_cnt}.")
     
     log.info(f"Finished training bpe. Vocab size {len(current_encoding)}")
     return current_encoding, merge_history
