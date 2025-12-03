@@ -1,4 +1,5 @@
 import concurrent.futures
+import io
 import logging
 import os
 import sys
@@ -67,86 +68,86 @@ def find_chunk_boundaries(
 # have many threads working concurrently without the heap memory exploding.
 def word_count(file_name: str, start: int, end: int, special_token_pattern: bytes) -> dict[str, int]:
     freq = defaultdict(int)
-    for token in produce_tokens(file_name, start, end, special_token_pattern):
-        freq[token] += 1
+    with open(file_name, "rb") as file:
+        for token in produce_tokens(file, start, end, special_token_pattern):
+            freq[token] += 1
     return freq
 
 
 def produce_tokens(
-        file_name: str, start: int, end: int, special_token_pattern: bytes) -> Generator[str, None, None]:
-    log.info(f"Starting to count tokens for file {file_name} start {start} end {end}")
+        file: io.BufferedReader, start: int, end: int, special_token_pattern: bytes) -> Generator[str, None, None]:
+    log.info(f"Starting to count tokens for file {file.name} start {start} end {end}")
 
     LOAD_SIZE = 512 << 10 # 512KB
-    with open(file_name, "rb") as file:
-        file.seek(start)
+    file.seek(start)
 
-        # Algorithm:
-        # 1. We load LOAD_SIZE into memory and append to working_set 
-        #    (list of strings). We continue loading until the latest
-        #    mini_chunk contains a <|endoftext|> token.
-        # 2. Split the lastest mini_chunk by the last <|endoftext|>,
-        #    and append only the first part into the working_set.
-        # 3. Now the working_set contains N complete paragraphs, we
-        #    can start word counting on it.
-        # 4. Repeat 1 (remember to get the 2nd split from step 2),
-        #    until the file portion is exhausted.
+    # Algorithm:
+    # 1. We load LOAD_SIZE into memory and append to working_set 
+    #    (list of strings). We continue loading until the latest
+    #    mini_chunk contains a <|endoftext|> token.
+    # 2. Split the lastest mini_chunk by the last <|endoftext|>,
+    #    and append only the first part into the working_set.
+    # 3. Now the working_set contains N complete paragraphs, we
+    #    can start word counting on it.
+    # 4. Repeat 1 (remember to get the 2nd split from step 2),
+    #    until the file portion is exhausted.
 
-        loaded_size = 0
-        working_set: list[str] = [] # list of mini_chunks loaded so far
-        chunks_loaded = 0
-        token_count = 0
-        total_load_size = end - start
+    loaded_size = 0
+    working_set: list[str] = [] # list of mini_chunks loaded so far
+    chunks_loaded = 0
+    token_count = 0
+    total_load_size = end - start
 
-        def working_set_size():
-            return sum(map(len, working_set))
+    def working_set_size():
+        return sum(map(len, working_set))
 
-        while loaded_size < total_load_size or working_set_size() != 0:
-            if chunks_loaded > 0 and chunks_loaded % 100 == 0:
-                log.info(f"Loaded {chunks_loaded} chunks ({loaded_size >> 10}KB). "
-                         f"Current token count {token_count}")
+    while loaded_size < total_load_size or working_set_size() != 0:
+        if chunks_loaded > 0 and chunks_loaded % 100 == 0:
+            log.info(f"Loaded {chunks_loaded} chunks ({loaded_size >> 10}KB). "
+                        f"Current token count {token_count}")
 
-            load_size = min(LOAD_SIZE, total_load_size - loaded_size)
-            log.debug("Loading %dMB into memory", loaded_size >> 20)
-            mini_chunk = b""
+        load_size = min(LOAD_SIZE, total_load_size - loaded_size)
+        log.debug("Loading %dMB into memory", loaded_size >> 20)
+        mini_chunk = b""
+        if loaded_size < total_load_size:
+            mini_chunk = file.read(load_size)
+            chunks_loaded += 1
+            loaded_size += load_size
+
+        pre_split = None
+
+        found_at = re.search(special_token_pattern, mini_chunk)
+        if found_at:
+            special_token_start, special_token = found_at.start(), found_at.group(0)
+            log.debug("Found mini_chunk containing special token. "\
+                    "chunks_loaded=%d mini_chunk=%d found_at=%d special_token=%s",
+                    chunks_loaded, len(mini_chunk), special_token_start, special_token)
+
+            idx_of_first_char_after_tok = special_token_start + len(special_token)
+            pre_split = mini_chunk[idx_of_first_char_after_tok:]
+            working_set.append(mini_chunk[:special_token_start])
+            log.debug("Splitting mini_chunk %d, %d, %d", len(mini_chunk), special_token_start, len(pre_split))
+        else:
+            working_set.append(mini_chunk)
             if loaded_size < total_load_size:
-                mini_chunk = file.read(load_size)
-                chunks_loaded += 1
-                loaded_size += load_size
+                log.debug("Special token not found. Appending to working set and continue to load.")
+                continue
 
-            pre_split = None
-
-            found_at = re.search(special_token_pattern, mini_chunk)
-            if found_at:
-                special_token_start, special_token = found_at.start(), found_at.group(0)
-                log.debug("Found mini_chunk containing special token. "\
-                        "chunks_loaded=%d mini_chunk=%d found_at=%d special_token=%s",
-                        chunks_loaded, len(mini_chunk), special_token_start, special_token)
-
-                idx_of_first_char_after_tok = special_token_start + len(special_token)
-                pre_split = mini_chunk[idx_of_first_char_after_tok:]
-                working_set.append(mini_chunk[:special_token_start])
-                log.debug("Splitting mini_chunk %d, %d, %d", len(mini_chunk), special_token_start, len(pre_split))
-            else:
-                working_set.append(mini_chunk)
-                if loaded_size < total_load_size:
-                    log.debug("Special token not found. Appending to working set and continue to load.")
-                    continue
-
-            to_word_count: bytes = b"".join(working_set)
-            working_set.clear()
-            
-            paragraphs = re.split(special_token_pattern, to_word_count)
-            for paragraph in paragraphs: 
-                scanner = re.finditer(TOKEN_SPLIT_PAT, paragraph)
-                for token in scanner:
-                    token_count += 1
-                    yield token.group(0)
-            
-            if pre_split is not None:
-                working_set.append(pre_split)
+        to_word_count: bytes = b"".join(working_set)
+        working_set.clear()
         
-        log.info(f"Finished portion. loaded_size={loaded_size} chunks_loaded={chunks_loaded} "\
-                 f"tokens_count={token_count}")
+        paragraphs = re.split(special_token_pattern, to_word_count)
+        for paragraph in paragraphs: 
+            scanner = re.finditer(TOKEN_SPLIT_PAT, paragraph)
+            for token in scanner:
+                token_count += 1
+                yield token.group(0)
+        
+        if pre_split is not None:
+            working_set.append(pre_split)
+    
+    log.info(f"Finished portion. loaded_size={loaded_size} chunks_loaded={chunks_loaded} "\
+                f"tokens_count={token_count}")
 
 
 def validate_split_boundaries(parallelism: int, boundaries: list[int])-> list[tuple[int, int]]:
@@ -186,6 +187,11 @@ async def drive_concurrent_word_count(
     
     return [task.result() for task in tasks]
 
+
+def build_special_tokens_pattern(special_tokens: list[str]) -> bytes:
+    return "|".join(map(re.escape, special_tokens)).encode('utf-8')
+
+
 def pre_tokenize(file_name: str, parallelism: int, special_tokens: list[str]) -> dict[str, int]:
     # 0. build special tokens regex
     # 1. find boundaries
@@ -194,7 +200,7 @@ def pre_tokenize(file_name: str, parallelism: int, special_tokens: list[str]) ->
 
     # Step 0: build special tokens regex
     log.info(f"Received special tokens {special_tokens}")
-    special_tokens_pattern = "|".join(map(re.escape, special_tokens)).encode('utf-8')
+    special_tokens_pattern = build_special_tokens_pattern(special_tokens)
     log.info(f"Using special tokens pattern {special_tokens_pattern}")
 
     # Step 1: find boundaries
@@ -381,3 +387,80 @@ def learn_merges(
     
     log.info(f"Finished training bpe. Vocab size {len(current_encoding)}")
     return current_encoding, merge_history
+
+
+class Tokenizer:
+    def __init__(
+            self, 
+            vocab: dict[int, bytes], 
+            merges: list[tuple[bytes, bytes]], 
+            special_tokens: list[str] = None):
+        self.vocab = vocab
+        self.vocab_reverse = {byte_rep: encoded for encoded, byte_rep in self.vocab.items()}
+        self.merges = set(merges)
+        self.special_tokens = special_tokens or ["<|endoftext|>"]
+    
+    @classmethod
+    def from_files(
+        clz, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] = None):
+        raise Exception("Unimplemented")
+    
+    def decode(self, ids: list[int]) -> str:
+        working_set: list[str] = []
+
+        for id in ids:
+            working_set.append(self.vocab[id])
+
+        return b"".join(working_set).decode('utf-8')
+    
+    def encode(self, text: str) -> list[int]:
+        result = []
+        for token in self._tokenize_text(text):
+            for encoded in self._encode_token(token):
+                result.append(encoded)
+        return result
+    
+    def encode_iterable(self, file: io.BufferedReader) -> Generator[int, None, None]:
+        special_token_pattern = build_special_tokens_pattern(self.special_tokens)
+        file_size = file.tell()
+        for token in produce_tokens(file, 0, file_size, special_token_pattern):
+            for encoded in self._encode_token(token):
+                yield encoded
+    
+    def _encode_token(self, token: bytes) -> Generator[int, None, None]:
+        if len(token) == 0:
+            raise Exception("empty token")
+        
+        if len(token) == 1:
+            yield self.vocab_reverse[token]
+            return
+        
+        full_encoding = self.vocab_reverse.get(token)
+        if full_encoding:
+            yield full_encoding
+            return
+        
+        stack = [token[0].to_bytes(1, 'big')]
+        for i in range(1, len(token)):
+            b1, b2 = stack[-1], token[i].to_bytes(1, 'big')
+            if (b1, b2) in self.merges:
+                stack.pop()
+                stack.append(b1 + b2)
+            else:
+                stack.append(b2)
+        
+        for b in stack:
+            yield self.vocab_reverse[b]
+    
+    def _tokenize_text(self, text: str) -> Generator[bytes, None, None]:
+        # split the text with special_token
+        special_tokens_pattern = build_special_tokens_pattern(self.special_tokens)
+        paragraphs = re.split(special_tokens_pattern, text.encode('utf-8'))
+
+        for paragraph in paragraphs:
+            scanner = re.finditer(TOKEN_SPLIT_PAT, paragraph)
+            for token in scanner:
+                yield token.group(0)
+
+
+        
