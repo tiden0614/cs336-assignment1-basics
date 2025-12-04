@@ -386,7 +386,7 @@ def test_encode_iterable_tinystories_sample_roundtrip():
         merges_path=MERGES_PATH,
     )
     all_ids = []
-    with open(FIXTURES_PATH / "tinystories_sample.txt") as f:
+    with open(FIXTURES_PATH / "tinystories_sample.txt", 'rb') as f:
         for _id in tokenizer.encode_iterable(f):
             all_ids.append(_id)
     with open(FIXTURES_PATH / "tinystories_sample.txt") as f:
@@ -404,7 +404,7 @@ def test_encode_iterable_tinystories_matches_tiktoken():
         corpus_contents = f.read()
     reference_ids = reference_tokenizer.encode(corpus_contents, allowed_special={"<|endoftext|>"})
     all_ids = []
-    with open(FIXTURES_PATH / "tinystories_sample.txt") as f:
+    with open(FIXTURES_PATH / "tinystories_sample.txt", 'rb') as f:
         for _id in tokenizer.encode_iterable(f):
             all_ids.append(_id)
     assert all_ids == reference_ids
@@ -422,7 +422,7 @@ def test_encode_iterable_memory_usage():
         vocab_path=VOCAB_PATH,
         merges_path=MERGES_PATH,
     )
-    with open(FIXTURES_PATH / "tinystories_sample_5M.txt") as f:
+    with open(FIXTURES_PATH / "tinystories_sample_5M.txt", 'rb') as f:
         ids = []
         for _id in _encode_iterable(tokenizer, f):
             ids.append(_id)

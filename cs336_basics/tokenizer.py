@@ -187,6 +187,8 @@ def produce_tokens(
         for token in nested_token_iter_loop(
             to_word_count, special_token_pattern, exclude_special_tokens):
             token_count += 1
+            if token_count % 10000 == 0:
+                log.debug("generated %d tokens", token_count)
             yield token
 
         if pre_split is not None:
@@ -483,11 +485,12 @@ class Tokenizer:
     
     def encode_iterable(self, file: io.BufferedReader) -> Generator[int, None, None]:
         special_token_pattern = build_special_tokens_pattern(self.special_tokens)
+        file.seek(0, os.SEEK_END)
         file_size = file.tell()
+        file.seek(0)
         for token in produce_tokens(
             file, 0, file_size, special_token_pattern, exclude_special_tokens=False):
-            for encoded in self._encode_token(token):
-                yield encoded
+            yield from self._encode_token(token)
     
     def _encode_token(self, token: bytes) -> Generator[int, None, None]:
         if len(token) == 0:
