@@ -73,11 +73,9 @@ def word_count(
         special_token_pattern: bytes) -> dict[str, int]:
     freq = defaultdict(int)
     with open(file_name, "rb") as file:
-        with open('output3.log', 'w') as wfile:
-            for token in produce_tokens(
-                file, start, end, special_token_pattern, exclude_special_tokens=True):
-                wfile.write(str(token) + '\n')
-                freq[token] += 1
+        for token in produce_tokens(
+            file, start, end, special_token_pattern, exclude_special_tokens=True):
+            freq[token] += 1
     return freq
 
 
