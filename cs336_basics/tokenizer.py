@@ -81,12 +81,44 @@ def word_count(
     return freq
 
 
+def nested_token_iter_loop(
+        text: bytes, 
+        special_token_pattern: bytes, 
+        exclude_special_tokens: bool) -> Generator[bytes, None, None]:
+    if re.search(special_token_pattern, text):
+        special_token_scanner = re.finditer(special_token_pattern, text)
+        scanner_start_idx = 0
+        for special_token in special_token_scanner:
+            token_scanner = TOKEN_SPLIT_PAT.finditer(
+                text, 
+                pos=scanner_start_idx, 
+                endpos=special_token.start())
+            for token in token_scanner:
+                yield token.group(0)
+
+            if not exclude_special_tokens:
+                yield special_token.group(0)
+
+            scanner_start_idx = special_token.end()
+        
+        if scanner_start_idx < len(text):
+            token_scanner = TOKEN_SPLIT_PAT.finditer(
+                text, 
+                pos=scanner_start_idx)
+            for token in token_scanner:
+                yield token.group(0)
+
+    else:
+        for token in TOKEN_SPLIT_PAT.finditer(text):
+            yield token.group(0)
+
+
 def produce_tokens(
         file: io.BufferedReader, 
         start: int, 
         end: int, 
         special_token_pattern: bytes,
-        exclude_special_tokens: bool) -> Generator[str, None, None]:
+        exclude_special_tokens: bool) -> Generator[bytes, None, None]:
     log.info(f"Starting to count tokens for file {file.name} start {start} end {end}")
 
     LOAD_SIZE = 512 << 10 # 512KB
@@ -104,7 +136,7 @@ def produce_tokens(
     #    until the file portion is exhausted.
 
     loaded_size = 0
-    working_set: list[str] = [] # list of mini_chunks loaded so far
+    working_set: list[bytes] = [] # list of mini_chunks loaded so far
     chunks_loaded = 0
     token_count = 0
     total_load_size = end - start
@@ -153,37 +185,11 @@ def produce_tokens(
 
         to_word_count: bytes = b"".join(working_set)
         working_set.clear()
-        
-        if re.search(special_token_pattern, to_word_count):
-            special_token_scanner = re.finditer(special_token_pattern, to_word_count)
-            scanner_start_idx = 0
-            for special_token in special_token_scanner:
-                token_scanner = TOKEN_SPLIT_PAT.finditer(
-                    to_word_count, 
-                    pos=scanner_start_idx, 
-                    endpos=special_token.start())
-                for token in token_scanner:
-                    token_count += 1
-                    yield token.group(0)
 
-                if not exclude_special_tokens:
-                    token_count += 1
-                    yield special_token.group(0)
-
-                scanner_start_idx = special_token.end()
-            
-            if scanner_start_idx < len(to_word_count):
-                token_scanner = TOKEN_SPLIT_PAT.finditer(
-                    to_word_count, 
-                    pos=scanner_start_idx)
-                for token in token_scanner:
-                    token_count += 1
-                    yield token.group(0)
-
-        else:
-            for token in TOKEN_SPLIT_PAT.finditer(to_word_count):
-                token_count += 1
-                yield token.group(0)
+        for token in nested_token_iter_loop(
+            to_word_count, special_token_pattern, exclude_special_tokens):
+            token_count += 1
+            yield token
 
         if pre_split is not None:
             working_set.append(pre_split)
@@ -231,7 +237,7 @@ async def drive_concurrent_word_count(
 
 
 def build_special_tokens_pattern(special_tokens: list[str]) -> bytes:
-    return "|".join(map(re.escape, special_tokens)).encode('utf-8')
+    return "|".join(map(re.escape, sorted(special_tokens, reverse=True))).encode('utf-8')
 
 
 def pre_tokenize(file_name: str, parallelism: int, special_tokens: list[str]) -> dict[str, int]:
@@ -299,6 +305,20 @@ def initialize_current_encoding(special_tokens: list[str]) -> dict[int, bytes]:
 def get_bytes_pair(token_sig):
     for i in range(len(token_sig) - 1):
         yield token_sig[i], token_sig[i + 1]
+
+
+def replace_bytes_pair(merged: list[bytes], b1: bytes, b2: bytes):
+    found_match = True
+    while found_match:
+        found_match = False
+        for i in range(len(merged) - 1):
+            ob1, ob2 = merged[i], merged[i + 1]
+            if ob1 == b1 and ob2 == b2:
+                found_match = True
+                # delete ob1 and ob2 from merged and then insert b1 + b2
+                del merged[i : i + 2]
+                merged.insert(i, b1 + b2)
+                break
 
 
 def initialize_merged_token_idx(
@@ -439,7 +459,8 @@ class Tokenizer:
             special_tokens: list[str] = None):
         self.vocab = vocab
         self.vocab_reverse = {byte_rep: encoded for encoded, byte_rep in self.vocab.items()}
-        self.merges = set(merges)
+        self.merges = merges
+        self.merges_set = set(merges)
         self.special_tokens = special_tokens or ["<|endoftext|>"]
     
     @classmethod
@@ -465,11 +486,43 @@ class Tokenizer:
     def encode_iterable(self, file: io.BufferedReader) -> Generator[int, None, None]:
         special_token_pattern = build_special_tokens_pattern(self.special_tokens)
         file_size = file.tell()
-        for token in produce_tokens(file, 0, file_size, special_token_pattern):
+        for token in produce_tokens(
+            file, 0, file_size, special_token_pattern, exclude_special_tokens=False):
             for encoded in self._encode_token(token):
                 yield encoded
     
     def _encode_token(self, token: bytes) -> Generator[int, None, None]:
+        if len(token) == 0:
+            raise Exception("empty token")
+        
+        if len(token) == 1:
+            yield self.vocab_reverse[token]
+            return
+        
+        full_encoding = self.vocab_reverse.get(token)
+        if full_encoding:
+            yield full_encoding
+            return
+
+        merged = [t.to_bytes(1, 'big') for t in token]
+
+        found_match = True
+        while found_match:
+            found_match = False
+            for mb1, mb2 in self.merges:
+                for b1, b2 in get_bytes_pair(merged):
+                    if mb1 == b1 and mb2 == b2:
+                        found_match = True
+                        replace_bytes_pair(merged, b1, b2)
+                        break
+                if found_match:
+                    break
+        
+        for b in merged:
+            yield self.vocab_reverse[b]
+                        
+
+    def _encode_token_stack(self, token: bytes) -> Generator[int, None, None]:
         if len(token) == 0:
             raise Exception("empty token")
         
@@ -490,9 +543,12 @@ class Tokenizer:
                 continue
 
             b1, b2 = merged[-1], pending.pop()
-            if (b1, b2) in self.merges:
+            if (b1, b2) in self.merges_set:
                 merged.pop()
                 pending.append(b1 + b2)
+
+                while merged:
+                    pending.append(merged.pop())
             else:
                 merged.append(b2)
         
@@ -500,10 +556,11 @@ class Tokenizer:
             yield self.vocab_reverse[b]
     
     def _tokenize_text(self, text: str) -> Generator[bytes, None, None]:
-        # split the text with special_token
-        scanner = re.finditer(TOKEN_SPLIT_PAT, text)
-        for token in scanner:
-            yield token.group(0)
+        for token in nested_token_iter_loop(
+            text.encode('utf-8'), 
+            build_special_tokens_pattern(self.special_tokens), 
+            exclude_special_tokens=False):
+            yield token
 
 
         
