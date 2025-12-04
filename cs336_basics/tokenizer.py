@@ -557,11 +557,10 @@ class Tokenizer:
             yield self.vocab_reverse[b]
     
     def _tokenize_text(self, text: str) -> Generator[bytes, None, None]:
-        for token in nested_token_iter_loop(
+        yield from nested_token_iter_loop(
             text.encode('utf-8'), 
             build_special_tokens_pattern(self.special_tokens), 
-            exclude_special_tokens=False):
-            yield token
+            exclude_special_tokens=False)
 
 
         
