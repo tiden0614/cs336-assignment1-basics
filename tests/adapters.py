@@ -56,7 +56,9 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    embedding_module = lego.EmbeddingModule(vocab_size, d_model)
+    embedding_module.load_state_dict({"embeddings": weights})
+    return embedding_module.forward(token_ids)
 
 
 def run_swiglu(

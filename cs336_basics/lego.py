@@ -23,3 +23,20 @@ class LinearModule(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output = einx.dot("... in, out in -> ... out", x, self.W)
         return output
+
+
+class EmbeddingModule(nn.Module):
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        device: torch.device = None,
+        dtype: torch.dtype = None,
+    ):
+        super().__init__()
+        embeddings = torch.empty(num_embeddings, embedding_dim, device=device, dtype=dtype)
+        nn.init.trunc_normal_(embeddings, mean=0.0, std=1, a = -3, b = 3)
+        self.embeddings = nn.parameter.Parameter(embeddings)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings[token_ids]
