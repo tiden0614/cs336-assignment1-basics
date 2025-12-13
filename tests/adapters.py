@@ -10,6 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 import cs336_basics.tokenizer as bpe_tok
+import cs336_basics.lego as lego
 
 
 def run_linear(
@@ -31,7 +32,9 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    linear_module = lego.LinearModule(d_in, d_out)
+    linear_module.load_state_dict({"W": weights})
+    return linear_module.forward(in_features)
 
 
 def run_embedding(
