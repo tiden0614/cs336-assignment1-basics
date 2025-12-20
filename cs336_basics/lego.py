@@ -6,6 +6,20 @@ import einx
 from jaxtyping import Float, Int
 
 
+def _trunc_norm_init_parameters(
+    *dimensions,
+    mean: float,
+    std: float,
+    a: float,
+    b: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> nn.parameter.Parameter:
+    p = torch.empty(*dimensions, device=device, dtype=dtype)
+    nn.init.trunc_normal_(p, mean=mean, std=std, a=a, b=b)
+    return nn.Parameter(p)
+
+
 class LinearModule(nn.Module):
     def __init__(
         self,
@@ -71,3 +85,49 @@ class RMSNormModule(nn.Module):
         result = einx.divide("... d_model, ... 1 -> ... d_model", x_f32, rms)
         result = einx.multiply("... d_model, d_model -> ... d_model", result, self.g)
         return result.to(in_dtype)
+
+
+class SwigluModule(nn.Module):
+    def __init__(
+        self, d_model: int, d_ff: int, device: torch.device = None, dtype: torch.dtype = None
+    ):
+        super().__init__()
+
+        # $$ d_{ff} = \frac{8}{3}d_{model} $$
+        #
+        # and d_ff needs to be a multiply of 64 to make efficient use of hardware
+        #
+        # d_ff = 8 * d_model // 3
+        # d_ff = int(math.log(d_ff, 64)) ** 64
+        # d_ff = max(d_ff, d_model)
+
+        # $$ W_1, W_3 \in R^{d_{ff} \cross d_{model}} $$
+        # $$ W_2 \in R^{d_{model} \cross d_{ff}} $$
+
+        self.w1 = _trunc_norm_init_parameters(
+            d_ff, d_model, mean=0.0, std=1, a=-3, b=3, device=device, dtype=dtype
+        )
+        self.w2 = _trunc_norm_init_parameters(
+            d_model, d_ff, mean=0.0, std=1, a=-3, b=3, device=device, dtype=dtype
+        )
+        self.w3 = _trunc_norm_init_parameters(
+            d_ff, d_model, mean=0.0, std=1, a=-3, b=3, device=device, dtype=dtype
+        )
+    
+    def forward(self, x: Float[Tensor, "... d_model"]) -> Float[Tensor, "... d_model"]:
+        # $$ SwiGLU(x, W_1, W_2, W_3) = W_2(SiLu(W_1x) * W_3x) $$
+
+        # $$ t_1 = W_{1}x $$
+        t1 = einx.dot("... d_model, d_ff d_model -> ... d_ff", x, self.w1)
+
+        # $$ t_2 = SiLu(W_{1}x) = SiLu(t_{1}) = t_1 * sigmoid(t_1) $$
+        t2 = einx.multiply("... d_ff, ... d_ff -> ... d_ff", t1, torch.sigmoid(t1))
+
+        # $$ t_3 = W_3x $$
+        t3 = einx.dot("... d_model, d_ff d_model -> ... d_ff", x, self.w3)
+
+        # $$ t_4 = SiLu(W_1x)*W_3x = t_2 * t_3 $$
+        t4 = einx.multiply("... d_ff, ... d_ff -> ... d_ff", t2, t3)
+
+        # $$ result = W_2(SiLu(W_1x) * W_3x) = W_2t_4 $$
+        return einx.dot("d_model d_ff, ... d_ff -> ... d_model", self.w2, t4)
