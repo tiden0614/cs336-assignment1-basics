@@ -89,7 +89,11 @@ class RMSNormModule(nn.Module):
 
 class SwigluModule(nn.Module):
     def __init__(
-        self, d_model: int, d_ff: int, device: torch.device = None, dtype: torch.dtype = None
+        self,
+        d_model: int,
+        d_ff: int,
+        device: torch.device = None,
+        dtype: torch.dtype = None,
     ):
         super().__init__()
 
@@ -113,7 +117,7 @@ class SwigluModule(nn.Module):
         self.w3 = _trunc_norm_init_parameters(
             d_ff, d_model, mean=0.0, std=1, a=-3, b=3, device=device, dtype=dtype
         )
-    
+
     def forward(self, x: Float[Tensor, "... d_model"]) -> Float[Tensor, "... d_model"]:
         # $$ SwiGLU(x, W_1, W_2, W_3) = W_2(SiLu(W_1x) * W_3x) $$
 
@@ -131,3 +135,215 @@ class SwigluModule(nn.Module):
 
         # $$ result = W_2(SiLu(W_1x) * W_3x) = W_2t_4 $$
         return einx.dot("d_model d_ff, ... d_ff -> ... d_model", self.w2, t4)
+
+
+class RotaryPositionalEmbedding(nn.Module):
+    def __init__(
+        self, theta: float, d_k: int, max_seq_len: int, device: torch.device = None
+    ):
+        super().__init__()
+
+        """
+        Given
+        $$
+        R_k^i = \begin{bmatrix}\cos(\theta_{i,k}) & -\sin(\theta_{i,k}) \\
+                                 \sin(\theta_{i,k}) & \cos(\theta_{i,k})\end{bmatrix}
+        $$
+
+        
+        $$
+        R^i = \begin{bmatrix}
+        R_1^i & 0 & 0 & \dots & 0 \\
+        0 & R_2^i & 0 & \dots & 0 \\
+        0 & 0 & R_3^i & \dots & 0 \\
+        \vdots & \vdots & \vdots & \ddots & \vdots \\
+        0 & 0 & 0 & \dots & R_{d/2}^i
+        \end{bmatrix}
+        $$
+        
+        $$ i \in [1,max\_seq\_len] $$
+
+        
+        We will store $$C, S \in \real^{max\_seq\_len \cross k}, k = \frac{d}{2}$$
+        and C, S store precomputed cos and sin values
+        for given position
+        """
+
+        self.k = d_k // 2
+        i_dim = torch.arange(0, max_seq_len, 1, dtype=torch.float)
+        k_dim = torch.arange(1, self.k + 1, 1, dtype=torch.float)
+
+        """
+
+        $$
+        I_{\text{grid}} = \begin{bmatrix} 
+        1 & 1 & \cdots & 1 \\ 
+        2 & 2 & \cdots & 2 \\ 
+        \vdots & \vdots & \ddots & \vdots \\ 
+        i & i & \cdots & i \end{bmatrix}
+        $$
+
+        """
+
+        """
+
+        $$
+        K_{\text{grid}} = \begin{bmatrix} 
+        1 & 2 & \cdots & k \\ 
+        1 & 2 & \cdots & k \\ 
+        \vdots & \vdots & \ddots & \vdots \\ 
+        1 & 2 & \cdots & k \end{bmatrix}
+        $$
+
+        """
+        i_grid, k_grid = torch.meshgrid(i_dim, k_dim, indexing="ij")
+
+        # $$\theta_{i,k} = \frac{i}{\Theta^{(2k - 2)/d}}$$
+
+        denominator = theta ** ((2 * k_grid - 2) / d_k)
+        theta_grid = einx.divide("i k, i k -> i k", i_grid, denominator)
+        C = torch.cos(theta_grid)
+        S = torch.sin(theta_grid)
+
+        self.register_buffer("cos_k", C)
+        self.register_buffer("sin_k", S)
+
+    def forward(
+        self,
+        x: Float[torch.Tensor, "... seq_len d_k"],
+        token_positions: Int[torch.Tensor, "... seq_len"],
+    ) -> Float[torch.Tensor, "... seq_len d_k"]:
+        """
+        $$
+        cos\_k = 
+        \begin{bmatrix} 
+
+        cos(\theta_{0,1}) & cos(\theta_{0,2}) & \cdots & cos(\theta_{0,k}) \\ 
+        cos(\theta_{1,1}) & cos(\theta_{1,1}) & \cdots & cos(\theta_{1,k}) \\ 
+        \vdots & \vdots & \ddots & \vdots \\ 
+        cos(\theta_{seq\_len-1,1}) & cos(\theta_{seq\_len-1,1}) & \cdots & cos(\theta_{seq\_len-1,k})  
+
+        \end{bmatrix}
+        $$
+        $$
+        diag\_embed(cos\_k[pos]) = 
+        \begin{bmatrix} 
+
+        cos(\theta_{pos,1}) & 0 & \cdots & 0 \\ 
+        0 & cos(\theta_{pos,1}) & \cdots & 0 \\ 
+        \vdots & \vdots & \ddots & \vdots \\ 
+        0 & 0 & \cdots & cos(\theta_{pos,k})  
+
+        \end{bmatrix}
+        $$
+        """
+        cos_diag: Float[torch.Tensor, "... seq_len k"] = torch.diag_embed(
+            self.cos_k[token_positions]
+        )
+
+        """
+        $$
+        template = 
+        \begin{bmatrix} 
+        1 & 0 \\ 
+        0 & 1 \\ 
+        \end{bmatrix}
+        $$
+        """
+        template = torch.eye(2)
+
+        """
+        
+        $$
+        cos\_R = 
+        \begin{bmatrix} 
+
+        cos(\theta_{0,1}) & cos(\theta_{0,2}) & \cdots & cos(\theta_{0,k}) \\ 
+        cos(\theta_{1,1}) & cos(\theta_{1,1}) & \cdots & cos(\theta_{1,k}) \\ 
+        \vdots & \vdots & \ddots & \vdots \\ 
+        cos(\theta_{seq\_len,1}) & cos(\theta_{seq\_len,1}) & \cdots & cos(\theta_{seq\_len,k})  
+
+        \end{bmatrix}
+        $$
+        $$
+        cos\_R = 
+        \begin{bmatrix} 
+
+        cos(\theta_{pos,1})\begin{bmatrix} 1 & 0 \\ 0 & 1 \\ \end{bmatrix} & 0 & \cdots & 0 \\ 
+        0 & cos(\theta_{pos,2})\begin{bmatrix} 1 & 0 \\ 0 & 1 \\ \end{bmatrix} & \cdots & 0 \\ 
+        \vdots & \vdots & \ddots & \vdots \\ 
+        0 & 0 & \cdots & cos(\theta_{pos,k})\begin{bmatrix} 1 & 0 \\ 0 & 1 \\ \end{bmatrix}  
+
+        \end{bmatrix}
+
+        =
+        
+        \begin{bmatrix} 
+
+        cos(\theta_{pos,1}) & 0 & 0 & 0 & \cdots & 0 & 0 \\ 
+        0 & cos(\theta_{pos,1}) & 0 & 0& \cdots & 0 & 0\\ 
+        0 & 0 & cos(\theta_{pos,2}) & 0 & \cdots & 0 & 0\\ 
+        0 & 0 & 0 & cos(\theta_{pos,2})  & \cdots & 0 & 0\\ 
+        \vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\ 
+        0 & 0 & 0 & 0& \cdots & cos(\theta_{pos,k}) & 0 \\
+        0 & 0 & 0 & 0& \cdots & 0 & cos(\theta_{pos,k})  
+
+        \end{bmatrix}
+        $$
+        """
+        cos_R: Float[torch.Tensor, "... seq_len d_k"] = torch.kron(cos_diag, template)
+
+        sin_diag: Float[torch.Tensor, "... seq_len k"] = torch.diag_embed(
+            self.sin_k[token_positions]
+        )
+        template = torch.Tensor([[0.0, -1.0], [1.0, 0.0]])
+        """
+        $$
+        sin\_R = 
+        \begin{bmatrix} 
+
+        sin(\theta_{pos,1})\begin{bmatrix} 0 & -1 \\ 1 & 0 \\ \end{bmatrix} & 0 & \cdots & 0 \\ 
+        0 & sin(\theta_{pos,2})\begin{bmatrix} 0 & -1 \\ 1 & 0 \\ \end{bmatrix} & \cdots & 0 \\ 
+        \vdots & \vdots & \ddots & \vdots \\ 
+        0 & 0 & \cdots & sin(\theta_{pos,k})\begin{bmatrix} 0 & -1 \\ 1 & 0 \\ \end{bmatrix}  
+
+        \end{bmatrix}
+
+        =
+        
+        \begin{bmatrix} 
+
+        0 & -sin(\theta_{pos,1}) & 0 & 0 & \cdots & 0 & 0 \\ 
+        sin(\theta_{pos,1}) & 0 & 0 & 0& \cdots & 0 & 0\\ 
+        0 & 0 & 0 & -sin(\theta_{pos,2}) & \cdots & 0 & 0\\ 
+        0 & 0 & sin(\theta_{pos,2}) & 0 & \cdots & 0 & 0\\ 
+        \vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\ 
+        0 & 0 & 0 & 0& \cdots & 0 & -sin(\theta_{pos,k})  \\
+        0 & 0 & 0 & 0& \cdots & sin(\theta_{pos,k}) & 0 
+
+        \end{bmatrix}
+        $$
+        """
+        sin_R: Float[torch.Tensor, "... seq_len d_k"] = torch.kron(sin_diag, template)
+
+        """
+        $$
+        R = cos\_R + sin\_R
+
+        =
+        
+        \begin{bmatrix} 
+
+        cos(\theta_{pos,1}) & -sin(\theta_{pos,1}) & 0 & 0 & \cdots & 0 & 0 \\ 
+        sin(\theta_{pos,1}) & cos(\theta_{pos,1})  & 0 & 0& \cdots & 0 & 0\\ 
+        0 & 0 & cos(\theta_{pos,2}) & -sin(\theta_{pos,2}) & \cdots & 0 & 0\\ 
+        0 & 0 & sin(\theta_{pos,2}) & cos(\theta_{pos,2}) & \cdots & 0 & 0\\ 
+        \vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\ 
+        0 & 0 & 0 & 0& \cdots & cos(\theta_{pos,k}) & -sin(\theta_{pos,k})  \\
+        0 & 0 & 0 & 0& \cdots & sin(\theta_{pos,k}) &  cos(\theta_{pos,k})
+
+        \end{bmatrix}
+        $$
+        """
+        R = cos_R + sin_R
+        return einx.dot("seq_len d_k_1 d_k, ... seq_len d_k -> ... seq_len d_k_1", R, x)
