@@ -347,3 +347,12 @@ class RotaryPositionalEmbedding(nn.Module):
         """
         R = cos_R + sin_R
         return einx.dot("seq_len d_k_1 d_k, ... seq_len d_k -> ... seq_len d_k_1", R, x)
+
+
+def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
+    max_val = torch.max(x, dim=dim, keepdim=True)
+    x = x - max_val.values
+    exp = torch.exp(x)
+    denom = torch.sum(exp, dim=dim, keepdim=True)
+    return exp / denom
+    
