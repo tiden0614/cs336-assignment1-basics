@@ -3,7 +3,7 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 import einx
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Bool
 
 
 def _trunc_norm_init_parameters(
@@ -355,4 +355,24 @@ def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
     exp = torch.exp(x)
     denom = torch.sum(exp, dim=dim, keepdim=True)
     return exp / denom
-    
+
+
+def attend(
+    q: Float[torch.Tensor, "... queries d_k"],
+    k: Float[torch.Tensor, "... keys d_k"],
+    v: Float[torch.Tensor, "... keys d_v"],
+    mask: Bool[Tensor, " ... queries keys"] = None,
+) -> Float[torch.Tensor, "... d_v"]:
+    d_k = k.shape[-1]
+    relevance = einx.dot(
+        "... queries d_k, ... keys d_k -> ... queries keys",
+        q,
+        k,
+    )
+    pre_softmax = relevance / (d_k**0.5)
+
+    if mask is not None:
+        pre_softmax = pre_softmax + torch.where(mask, 0.0, float("-inf"))
+
+    s = softmax(pre_softmax, -1)
+    return einx.dot("... queries keys, ... keys d_v -> ... queries d_v", s, v)
