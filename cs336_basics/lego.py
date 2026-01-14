@@ -376,3 +376,91 @@ def attend(
 
     s = softmax(pre_softmax, -1)
     return einx.dot("... queries keys, ... keys d_v -> ... queries d_v", s, v)
+
+
+class MultiHeadSelfAttentionModule(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        device: torch.device = None,
+        dtype: torch.dtype = None,
+    ):
+        super().__init__()
+        assert (
+            d_model % num_heads == 0
+        ), f"invalid params d_model={d_model} num_heads={num_heads}"
+        self.d_k = d_model // num_heads
+        self.d_v = d_model // num_heads
+        self.num_heads = num_heads
+        self.W_o = _trunc_norm_init_parameters(
+            d_model, d_model, mean=0.0, std=1.0, a=-3, b=3, device=device, dtype=dtype
+        )
+        self.W_qkv = _trunc_norm_init_parameters(
+            3 * d_model,
+            d_model,
+            mean=0.0,
+            std=1.0,
+            a=-3,
+            b=3,
+            device=device,
+            dtype=dtype,
+        )
+
+    def load_weights(
+        self,
+        q_proj_weight: Float[Tensor, " d_k d_in"],
+        k_proj_weight: Float[Tensor, " d_k d_in"],
+        v_proj_weight: Float[Tensor, " d_v d_in"],
+        o_proj_weight: Float[Tensor, " d_model d_v"],
+    ):
+        qkv_stacked = torch.stack([q_proj_weight, k_proj_weight, v_proj_weight])
+        qkv = einx.rearrange("three d_k d_in -> (three d_k) d_in", qkv_stacked)
+        self.load_state_dict({"W_qkv": qkv, "W_o": o_proj_weight})
+
+    def forward(
+        self, X: Float[Tensor, " ... seq_len d_model"]
+    ) -> Float[Tensor, "... seq_len d_model"]:
+        seq_len = X.shape[-2]
+
+        # Compute Q, K, V in a single matrix multiplication
+        QKV = einx.dot(
+            "heads_combined_d_model d_model, ... seq_len d_model -> ... seq_len heads_combined_d_model",
+            self.W_qkv,
+            X,
+        )
+
+        # Causal masking
+        mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+
+        # Rearrange the Q, K, V and send them to the attend function
+        # Q, K, V = einx.rearrange(
+        #     "... [3 out_heads out_d_h] -> 3 ... out_heads out_d_h",
+        #     QKV,
+        #     out_heads=self.num_heads,
+        #     out_d_h = self.d_k,
+        # )
+        all_head_features = QKV.shape[:-1]
+        qkv_reshaped = QKV.view(*all_head_features, 3, self.num_heads, self.d_k)
+        # Move num_heads in front of seq_len
+        qkv_reshaped = qkv_reshaped.movedim(-2, -4)
+        # Now split the 3 matrices by moving the 3 into the first position
+        Q, K, V = qkv_reshaped.movedim(-2, 0)
+
+        # TODO: apply RoPE to Q and K
+
+        attention = attend(Q, K, V, mask)
+        attention = einx.rearrange(
+            "... head seq_len d_h -> ... seq_len head d_h", attention
+        )
+        attention = einx.rearrange(
+            "... seq_len head d_h -> ... seq_len (head d_h)",
+            attention
+        )
+        result = einx.dot(
+            "d_model d_model_1, ... seq_len d_model_1 -> ... seq_len d_model",
+            self.W_o,
+            attention,
+            head=self.num_heads,
+        )
+        return result
