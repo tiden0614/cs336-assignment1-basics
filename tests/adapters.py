@@ -91,11 +91,13 @@ def run_swiglu(
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
     swiglu_module = lego.SwigluModule(d_model, d_ff)
-    swiglu_module.load_state_dict({
-        "w1": w1_weight,
-        "w2": w2_weight,
-        "w3": w3_weight,
-    })
+    swiglu_module.load_state_dict(
+        {
+            "w1": w1_weight,
+            "w2": w2_weight,
+            "w3": w3_weight,
+        }
+    )
     return swiglu_module.forward(in_features)
 
 
@@ -193,7 +195,11 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    mha_module = lego.MultiHeadSelfAttentionModule(
+        d_model=d_model, num_heads=num_heads, max_seq_len=max_seq_len, theta=theta
+    )
+    mha_module.load_weights(q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight)
+    return mha_module.forward(in_features, token_positions)
 
 
 def run_rope(
@@ -470,7 +476,9 @@ def run_cross_entropy(
     raise NotImplementedError
 
 
-def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
+def run_gradient_clipping(
+    parameters: Iterable[torch.nn.Parameter], max_l2_norm: float
+) -> None:
     """Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.
 
     Args:
@@ -608,7 +616,7 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
     word_count = bpe_tok.pre_tokenize(
-        file_name=input_path, parallelism=4, special_tokens=special_tokens)
+        file_name=input_path, parallelism=4, special_tokens=special_tokens
+    )
     passes = max(0, vocab_size - (len(special_tokens) + 256))
     return bpe_tok.learn_merges(word_count, passes, special_tokens)
-

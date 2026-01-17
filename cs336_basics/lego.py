@@ -205,10 +205,73 @@ class RotaryPositionalEmbedding(nn.Module):
         C = torch.cos(theta_grid)
         S = torch.sin(theta_grid)
 
-        self.register_buffer("cos_k", C)
-        self.register_buffer("sin_k", S)
+        self.register_buffer("cos_k", C, persistent=False)
+        self.register_buffer("sin_k", S, persistent=False)
+
+    def _rotate_interleaved(self, x: Float[Tensor, "... d"]) -> Float[Tensor, "... d"]:
+        d = x.shape[-1]
+        chunked = x.view(*x.shape[:-1], -1, 2)
+        swapped = chunked[..., [1, 0]]
+        flattened = swapped.flatten(start_dim=-2, end_dim=-1)
+        return flattened * torch.tensor([-1, 1] * (d // 2))
 
     def forward(
+        self,
+        x: Float[torch.Tensor, "... seq_len d_k"],
+        token_positions: Int[torch.Tensor, "... seq_len"],
+    ) -> Float[torch.Tensor, "... seq_len d_k"]:
+        """
+        $$
+        x =
+        \begin{bmatrix} 
+        x_{0,0} & x_{0,1} & x_{0,2} & x_{0,3} & \cdots & x_{0,d-2} & x_{0,d-1} \\
+        x_{1,0} & x_{1,1} & x_{1,2} & x_{1,3} & \cdots & x_{1,d-2} & x_{1,d-1} \\
+        \vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\
+        x_{seq\_len-1,0} & x_{seq\_len-1,1} & x_{seq\_len-1,2} & x_{seq\_len-1,3} & \cdots & x_{seq\_len-1,d-2} & x_{seq\_len-1,d-1}
+        \end{bmatrix}
+        $$
+
+        $$
+        x\_pair\_rotated =
+        \begin{bmatrix} 
+        -x_{0,1} & x_{0,0} & -x_{0,3} & x_{0,2} & \cdots & -x_{0,d-1} & x_{0,d-2} \\
+        -x_{1,1} & x_{1,0} & -x_{1,3} & x_{1,2} & \cdots & -x_{1,d-1} & x_{1,d-2} \\
+        \vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\
+        -x_{seq\_len-1,1} & x_{seq\_len-1,0} & -x_{seq\_len-1,3} & x_{seq\_len-1,2} & \cdots & -x_{seq\_len-1,d-1} & x_{seq\_len-1,d-2}
+        \end{bmatrix}
+        $$
+        """
+        x_pair_rotated = self._rotate_interleaved(x)
+        """
+        $$
+        cos\_k = 
+        \begin{bmatrix} 
+
+        cos(\theta_{0,1}) & cos(\theta_{0,2}) & \cdots & cos(\theta_{0,k}) \\ 
+        cos(\theta_{1,1}) & cos(\theta_{1,1}) & \cdots & cos(\theta_{1,k}) \\ 
+        \vdots & \vdots & \ddots & \vdots \\ 
+        cos(\theta_{seq\_len-1,1}) & cos(\theta_{seq\_len-1,1}) & \cdots & cos(\theta_{seq\_len-1,k})  
+
+        \end{bmatrix}
+        $$
+
+        $$
+        cos\_d = 
+        \begin{bmatrix} 
+
+        cos(\theta_{0,1}) &cos(\theta_{0,1}) & cos(\theta_{0,2}) & cos(\theta_{0,2}) & \cdots & cos(\theta_{0,k}) & cos(\theta_{0,k}) \\ 
+        cos(\theta_{1,1}) &cos(\theta_{1,1}) & cos(\theta_{1,2}) & cos(\theta_{1,2}) & \cdots & cos(\theta_{1,k}) & cos(\theta_{1,k}) \\ 
+        \vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\ 
+        cos(\theta_{seq\_len-1,1}) &cos(\theta_{seq\_len-1,1}) & cos(\theta_{seq\_len-1,2}) & cos(\theta_{seq\_len-1,2}) & \cdots & cos(\theta_{seq\_len-1,k}) & cos(\theta_{seq\_len-1,k}) \\ 
+
+        \end{bmatrix}
+        $$
+        """
+        cos_d = torch.repeat_interleave(self.cos_k[token_positions], repeats=2, dim=-1)
+        sin_d = torch.repeat_interleave(self.sin_k[token_positions], repeats=2, dim=-1)
+        return (x * cos_d) + (x_pair_rotated * sin_d)
+
+    def forward_slow_sparse_matrix_mul(
         self,
         x: Float[torch.Tensor, "... seq_len d_k"],
         token_positions: Int[torch.Tensor, "... seq_len"],
@@ -383,6 +446,8 @@ class MultiHeadSelfAttentionModule(nn.Module):
         self,
         d_model: int,
         num_heads: int,
+        max_seq_len: int = None,
+        theta: float = None,
         device: torch.device = None,
         dtype: torch.dtype = None,
     ):
@@ -407,6 +472,13 @@ class MultiHeadSelfAttentionModule(nn.Module):
             dtype=dtype,
         )
 
+        if max_seq_len is not None and theta is not None:
+            self.rope = RotaryPositionalEmbedding(
+                theta=theta, d_k=self.d_k, max_seq_len=max_seq_len, device=device
+            )
+        else:
+            self.rope = None
+
     def load_weights(
         self,
         q_proj_weight: Float[Tensor, " d_k d_in"],
@@ -419,7 +491,9 @@ class MultiHeadSelfAttentionModule(nn.Module):
         self.load_state_dict({"W_qkv": qkv, "W_o": o_proj_weight})
 
     def forward(
-        self, X: Float[Tensor, " ... seq_len d_model"]
+        self,
+        X: Float[Tensor, " ... seq_len d_model"],
+        token_positions: Int[Tensor, " ... seq_len"] = None,
     ) -> Float[Tensor, "... seq_len d_model"]:
         seq_len = X.shape[-2]
 
@@ -447,15 +521,17 @@ class MultiHeadSelfAttentionModule(nn.Module):
         # Now split the 3 matrices by moving the 3 into the first position
         Q, K, V = qkv_reshaped.movedim(-2, 0)
 
-        # TODO: apply RoPE to Q and K
+        # Apply ROPE
+        if self.rope is not None and token_positions is not None:
+            Q = self.rope.forward(Q, token_positions)
+            K = self.rope.forward(K, token_positions)
 
         attention = attend(Q, K, V, mask)
         attention = einx.rearrange(
             "... head seq_len d_h -> ... seq_len head d_h", attention
         )
         attention = einx.rearrange(
-            "... seq_len head d_h -> ... seq_len (head d_h)",
-            attention
+            "... seq_len head d_h -> ... seq_len (head d_h)", attention
         )
         result = einx.dot(
             "d_model d_model_1, ... seq_len d_model_1 -> ... seq_len d_model",
