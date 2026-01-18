@@ -540,3 +540,78 @@ class MultiHeadSelfAttentionModule(nn.Module):
             head=self.num_heads,
         )
         return result
+
+
+class TransformerBlock(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        theta: float,
+        device: torch.device = None,
+        dtype: torch.dtype = None,
+    ):
+        super().__init__()
+        self.max_seq_len = max_seq_len
+        self.rms_attention = RMSNormModule(d_model, device=device, dtype=dtype)
+        self.attention = MultiHeadSelfAttentionModule(
+            d_model,
+            num_heads,
+            max_seq_len=max_seq_len,
+            theta=theta,
+            device=device,
+            dtype=dtype,
+        )
+        self.rms_ffn = RMSNormModule(d_model, device=device, dtype=dtype)
+        self.ffn_swiglu = SwigluModule(d_model, d_ff, device=device, dtype=dtype)
+
+    def load_weights(
+        self,
+        attn_q_proj_weight: Float[Tensor, " d_k d_in"],
+        attn_k_proj_weight: Float[Tensor, " d_k d_in"],
+        attn_v_proj_weight: Float[Tensor, " d_v d_in"],
+        attn_o_proj_weight: Float[Tensor, " d_model d_v"],
+        rms_attention_weight: Float[Tensor, "d_model"],
+        ffn_w1_weight: Float[Tensor, "d_ff d_model"],
+        ffn_w2_weight: Float[Tensor, "d_model d_ff"],
+        ffn_w3_weight: Float[Tensor, "d_ff d_model"],
+        rms_ffn_weight: Float[Tensor, "d_model"],
+    ):
+        # RMSNorm before attention
+        self.rms_attention.load_state_dict({"g": rms_attention_weight})
+
+        # Attention
+        self.attention.load_weights(
+            attn_q_proj_weight,
+            attn_k_proj_weight,
+            attn_v_proj_weight,
+            attn_o_proj_weight,
+        )
+
+        # RMSNorm before FFN
+        self.rms_ffn.load_state_dict({"g": rms_ffn_weight})
+
+        # FFN
+        self.ffn_swiglu.load_state_dict(
+            {"w1": ffn_w1_weight, "w2": ffn_w2_weight, "w3": ffn_w3_weight}
+        )
+
+    def forward(
+        self, x: Float[Tensor, "batch seq_len d_model"]
+    ) -> Float[Tensor, "batch seq_len d_model"]:
+        rms_attention = self.rms_attention.forward(x)
+
+        seq_len = x.shape[1]
+        assert (
+            seq_len <= self.max_seq_len
+        ), f"cannot infer seq_len={seq_len} > max_seq_len={self.max_seq_len}"
+        positions = torch.arange(start=0, end=seq_len)
+        attention_result = self.attention.forward(rms_attention, positions)
+
+        ffn_input = x + attention_result
+        rms_ffn = self.rms_ffn.forward(ffn_input)
+        ffn_result = self.ffn_swiglu.forward(rms_ffn)
+
+        return ffn_input + ffn_result
