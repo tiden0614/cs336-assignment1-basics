@@ -143,7 +143,7 @@ class RotaryPositionalEmbedding(nn.Module):
     ):
         super().__init__()
 
-        """
+        r"""
         Given
         $$
         R_k^i = \begin{bmatrix}\cos(\theta_{i,k}) & -\sin(\theta_{i,k}) \\
@@ -173,7 +173,7 @@ class RotaryPositionalEmbedding(nn.Module):
         i_dim = torch.arange(0, max_seq_len, 1, dtype=torch.float)
         k_dim = torch.arange(1, self.k + 1, 1, dtype=torch.float)
 
-        """
+        r"""
 
         $$
         I_{\text{grid}} = \begin{bmatrix} 
@@ -185,7 +185,7 @@ class RotaryPositionalEmbedding(nn.Module):
 
         """
 
-        """
+        r"""
 
         $$
         K_{\text{grid}} = \begin{bmatrix} 
@@ -220,7 +220,7 @@ class RotaryPositionalEmbedding(nn.Module):
         x: Float[torch.Tensor, "... seq_len d_k"],
         token_positions: Int[torch.Tensor, "... seq_len"],
     ) -> Float[torch.Tensor, "... seq_len d_k"]:
-        """
+        r"""
         $$
         x =
         \begin{bmatrix} 
@@ -242,7 +242,7 @@ class RotaryPositionalEmbedding(nn.Module):
         $$
         """
         x_pair_rotated = self._rotate_interleaved(x)
-        """
+        r"""
         $$
         cos\_k = 
         \begin{bmatrix} 
@@ -276,7 +276,7 @@ class RotaryPositionalEmbedding(nn.Module):
         x: Float[torch.Tensor, "... seq_len d_k"],
         token_positions: Int[torch.Tensor, "... seq_len"],
     ) -> Float[torch.Tensor, "... seq_len d_k"]:
-        """
+        r"""
         $$
         cos\_k = 
         \begin{bmatrix} 
@@ -304,7 +304,7 @@ class RotaryPositionalEmbedding(nn.Module):
             self.cos_k[token_positions]
         )
 
-        """
+        r"""
         $$
         template = 
         \begin{bmatrix} 
@@ -315,7 +315,7 @@ class RotaryPositionalEmbedding(nn.Module):
         """
         template = torch.eye(2)
 
-        """
+        r"""
         
         $$
         cos\_R = 
@@ -360,7 +360,7 @@ class RotaryPositionalEmbedding(nn.Module):
             self.sin_k[token_positions]
         )
         template = torch.Tensor([[0.0, -1.0], [1.0, 0.0]])
-        """
+        r"""
         $$
         sin\_R = 
         \begin{bmatrix} 
@@ -389,7 +389,7 @@ class RotaryPositionalEmbedding(nn.Module):
         """
         sin_R: Float[torch.Tensor, "... seq_len d_k"] = torch.kron(sin_diag, template)
 
-        """
+        r"""
         $$
         R = cos\_R + sin\_R
 
@@ -569,9 +569,9 @@ class TransformerBlock(nn.Module):
 
     def load_weights(
         self,
-        attn_q_proj_weight: Float[Tensor, " d_k d_in"],
-        attn_k_proj_weight: Float[Tensor, " d_k d_in"],
-        attn_v_proj_weight: Float[Tensor, " d_v d_in"],
+        attn_q_proj_weight: Float[Tensor, " d_k d_model"],
+        attn_k_proj_weight: Float[Tensor, " d_k d_model"],
+        attn_v_proj_weight: Float[Tensor, " d_v d_model"],
         attn_o_proj_weight: Float[Tensor, " d_model d_v"],
         rms_attention_weight: Float[Tensor, "d_model"],
         ffn_w1_weight: Float[Tensor, "d_ff d_model"],
@@ -615,3 +615,33 @@ class TransformerBlock(nn.Module):
         ffn_result = self.ffn_swiglu.forward(rms_ffn)
 
         return ffn_input + ffn_result
+
+
+def cross_entropy(
+    o: Float[Tensor, "... batch_size vocab_size"],
+    x_pos: Float[Tensor, "... batch_size"],
+) -> float:
+    r"""
+    $$
+    p(x_{i+1}|x_{1:i}) = softmax(o_i)[x_{i+1}] = \frac{exp(o_i[x_{i+1}])}{\sum_{a=1}^{vocab\_size}exp(o_i[a])}
+    $$
+
+
+    $$
+    log\sum_{a=1}^{vocab\_size}exp(o_i[a] - M)
+    = log\sum_{a=1}^{vocab\_size}\frac{exp(o_i[a])}{exp(M)}
+    = log\frac{\sum_{a=1}^{vocab\_size}{exp(o_i[a])}}{exp(M)}
+    = log\sum_{a=1}^{vocab\_size}{exp(o_i[a])} - M
+    $$
+
+    $$
+    -log(softmax(o_i)[x_{i+1}]) = -log \frac{exp(o_i[x_{i+1}])}{\sum_{a=1}^{vocab\_size}exp(o_i[a])}
+    = -o_i[x_{i+1}] + log\sum_{a=1}^{vocab\_size}exp(o_i[a])
+    = -o_i[x_{i+1}] + log\sum_{a=1}^{vocab\_size}exp(o_i[a] - M) + M
+    $$
+    """
+    o_max = torch.amax(o, dim=-1, keepdim=True)
+    o_exp_sum = torch.sum(torch.exp(o - o_max), dim=-1, keepdim=True)
+    o_selected = o.gather(dim=-1, index=x_pos.unsqueeze(-1))
+    losses = -o_selected + torch.log(o_exp_sum) + o_max
+    return torch.sum(losses) / torch.numel(losses)
