@@ -617,10 +617,10 @@ class TransformerBlock(nn.Module):
         return ffn_input + ffn_result
 
 
-def cross_entropy(
+def _loss_function(
     o: Float[Tensor, "... batch_size vocab_size"],
     x_pos: Float[Tensor, "... batch_size"],
-) -> float:
+) -> Float[Tensor, "... batch_size"]:
     r"""
     $$
     p(x_{i+1}|x_{1:i}) = softmax(o_i)[x_{i+1}] = \frac{exp(o_i[x_{i+1}])}{\sum_{a=1}^{vocab\_size}exp(o_i[a])}
@@ -643,5 +643,21 @@ def cross_entropy(
     o_max = torch.amax(o, dim=-1, keepdim=True)
     o_exp_sum = torch.sum(torch.exp(o - o_max), dim=-1, keepdim=True)
     o_selected = o.gather(dim=-1, index=x_pos.unsqueeze(-1))
-    losses = -o_selected + torch.log(o_exp_sum) + o_max
+    return -o_selected + torch.log(o_exp_sum) + o_max
+
+
+def cross_entropy(
+    o: Float[Tensor, "... batch_size vocab_size"],
+    x_pos: Float[Tensor, "... batch_size"],
+) -> float:
+    losses = _loss_function(o, x_pos)
     return torch.sum(losses) / torch.numel(losses)
+
+
+def perplexity(
+    o: Float[Tensor, "... batch_size vocab_size"],
+    x_pos: Float[Tensor, "... batch_size"],
+) -> float:
+    losses = _loss_function(o, x_pos)
+    return torch.exp(torch.sum(losses) / torch.numel(losses))
+    
