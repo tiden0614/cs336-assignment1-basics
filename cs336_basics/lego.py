@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import einx
 from jaxtyping import Float, Int, Bool
+from collections.abc import Callable
+import math
 
 
 def _trunc_norm_init_parameters(
@@ -660,4 +662,97 @@ def perplexity(
 ) -> float:
     losses = _loss_function(o, x_pos)
     return torch.exp(torch.sum(losses) / torch.numel(losses))
-    
+
+
+class SGD(torch.optim.Optimizer):
+    def __init__(self, params, lr=1e-3):
+        assert lr >= 0, f"Invalid learning rate {lr}"
+        defaults = {"lr": lr}
+        super().__init__(params, defaults)
+
+    def step(self, closure: Callable = None):
+        loss = None if closure is None else closure()
+        for group in self.param_groups:
+            lr = group["lr"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+
+                state = self.state[p]
+                t = state.get("t", 0)  # iteration
+                grad = p.grad.data  # gradient of loss with respect to p
+                p.data -= lr / math.sqrt(t + 1) * grad  # apply gradient
+                state["t"] = t + 1
+
+        return loss
+
+
+def toy_training_loop():
+    weights = torch.nn.Parameter(5 * torch.randn((10, 10)))
+    opt = SGD([weights], lr=1)
+
+    for t in range(100):
+        opt.zero_grad()
+        loss = (weights**2).mean()
+        print(loss.cpu().item())
+        loss.backward()
+        opt.step()
+
+
+class AdamWOptimizer(torch.optim.Optimizer):
+    def __init__(
+        self,
+        params,
+        alpha: float,
+        beta1: float,
+        beta2: float,
+        epsilon: float,
+        lambda_: float,
+    ):
+        defaults = {
+            "alpha": alpha,
+            "beta1": beta1,
+            "beta2": beta2,
+            "epsilon": epsilon,
+            "lambda": lambda_,
+        }
+        super().__init__(params, defaults)
+
+    def step(self, closure: Callable = None):
+        loss = None if closure is None else closure()
+
+        def get_or_init_state(state, name, init_func):
+            if name not in state:
+                state[name] = init_func()
+            return state[name]
+
+        for group in self.param_groups:
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+
+                state = self.state[param]
+                t = state.get("t", 1)
+                state["t"] = t + 1
+                g = param.grad.data
+
+                m = get_or_init_state(state, "m", lambda: torch.zeros(*g.shape))
+                m = m * group["beta1"] + (1 - group["beta1"]) * g
+                state["m"] = m
+
+                v = get_or_init_state(state, "v", lambda: torch.zeros(*g.shape))
+                v = v * group["beta2"] + (1 - group["beta2"]) * g * g
+                state["v"] = v
+
+                alpha_t = (
+                    group["alpha"]
+                    * math.sqrt(1 - group["beta2"] ** t)
+                    / (1 - group["beta1"] ** t)
+                )
+                param.data = param.data - alpha_t * m / (
+                    torch.sqrt(v) + group["epsilon"]
+                )
+                param.data = (1 - group["alpha"] * group["lambda"]) * param.data
+
+        return loss

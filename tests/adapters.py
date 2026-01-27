@@ -512,7 +512,14 @@ def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    return lambda params, lr, weight_decay, betas, eps: lego.AdamWOptimizer(
+        params=params,
+        alpha=lr,
+        beta1=betas[0],
+        beta2=betas[1],
+        epsilon=eps,
+        lambda_=weight_decay,
+    )
 
 
 def run_get_lr_cosine_schedule(
