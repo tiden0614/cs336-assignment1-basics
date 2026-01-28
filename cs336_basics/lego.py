@@ -772,16 +772,19 @@ def cosine_annealing_learning_rate_schedule(
     )
 
 
-def gradient_clipping(params: Iterable[torch.nn.Parameter], max_l2: float, eps: float = 1e-6):
+def gradient_clipping(
+    params: Iterable[torch.nn.Parameter], max_l2: float, eps: float = 1e-6
+):
     # 1. Compute total L2 norm across all tensors
-    total_norm = torch.sqrt(sum(torch.sum(param.grad ** 2) for param in params if param.grad is not None))
-    
+    total_norm = torch.sqrt(
+        sum(torch.sum(param.grad**2) for param in params if param.grad is not None)
+    )
+
     # 2. Determine the scaling factor
     clip_coeff = max_l2 / max(total_norm, eps)
-    
+
     # 3. Apply the same scale to everything if total_norm > max_l2
     if clip_coeff < 1.0:
         for param in params:
             if param.grad is not None:
                 param.grad.mul_(clip_coeff)
-
