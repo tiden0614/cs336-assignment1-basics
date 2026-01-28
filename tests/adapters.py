@@ -505,7 +505,7 @@ def run_gradient_clipping(
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    return lego.gradient_clipping(parameters, max_l2_norm)
 
 
 def get_adamw_cls() -> Any:
@@ -547,7 +547,13 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    return lego.cosine_annealing_learning_rate_schedule(
+        t=it,
+        a_min=min_learning_rate,
+        a_max=max_learning_rate,
+        T_w=warmup_iters,
+        T_c=cosine_cycle_iters,
+    )
 
 
 def run_save_checkpoint(

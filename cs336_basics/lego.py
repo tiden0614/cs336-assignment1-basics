@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import einx
 from jaxtyping import Float, Int, Bool
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 import math
 
 
@@ -756,3 +756,32 @@ class AdamWOptimizer(torch.optim.Optimizer):
                 param.data = (1 - group["alpha"] * group["lambda"]) * param.data
 
         return loss
+
+
+def cosine_annealing_learning_rate_schedule(
+    t: int, a_min: float, a_max: float, T_w: int, T_c: int
+) -> float:
+    if t < T_w:
+        return a_max * t / T_w
+
+    if t > T_c:
+        return a_min
+
+    return (
+        a_min + (1 + math.cos(math.pi * (t - T_w) / (T_c - T_w))) * (a_max - a_min) / 2
+    )
+
+
+def gradient_clipping(params: Iterable[torch.nn.Parameter], max_l2: float, eps: float = 1e-6):
+    # 1. Compute total L2 norm across all tensors
+    total_norm = torch.sqrt(sum(torch.sum(param.grad ** 2) for param in params if param.grad is not None))
+    
+    # 2. Determine the scaling factor
+    clip_coeff = max_l2 / max(total_norm, eps)
+    
+    # 3. Apply the same scale to everything if total_norm > max_l2
+    if clip_coeff < 1.0:
+        for param in params:
+            if param.grad is not None:
+                param.grad.mul_(clip_coeff)
+
