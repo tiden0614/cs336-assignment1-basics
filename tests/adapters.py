@@ -11,6 +11,7 @@ from torch import Tensor
 
 import cs336_basics.tokenizer as bpe_tok
 import cs336_basics.lego as lego
+import cs336_basics.train as train
 
 
 def run_linear(
@@ -457,7 +458,12 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    return train.get_batch(
+        dataset=dataset,
+        device=device,
+        batch_size=batch_size,
+        context_length=context_length,
+    )
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
