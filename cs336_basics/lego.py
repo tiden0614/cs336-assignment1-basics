@@ -651,7 +651,7 @@ def _loss_function(
 def cross_entropy(
     o: Float[Tensor, "... batch_size vocab_size"],
     x_pos: Float[Tensor, "... batch_size"],
-) -> float:
+) -> Float[Tensor, "1"]:
     losses = _loss_function(o, x_pos)
     return torch.sum(losses) / torch.numel(losses)
 
@@ -709,6 +709,8 @@ class AdamWOptimizer(torch.optim.Optimizer):
         beta2: float,
         epsilon: float,
         lambda_: float,
+        device: torch.device = None,
+        dtype: torch.dtype = torch.float32,
     ):
         defaults = {
             "alpha": alpha,
@@ -718,6 +720,8 @@ class AdamWOptimizer(torch.optim.Optimizer):
             "lambda": lambda_,
         }
         super().__init__(params, defaults)
+        self.device = device
+        self.dtype = dtype
 
     def step(self, closure: Callable = None):
         loss = None if closure is None else closure()
@@ -737,11 +741,19 @@ class AdamWOptimizer(torch.optim.Optimizer):
                 state["t"] = t + 1
                 g = param.grad.data
 
-                m = get_or_init_state(state, "m", lambda: torch.zeros(*g.shape))
+                m = get_or_init_state(
+                    state,
+                    "m",
+                    lambda: torch.zeros(*g.shape, device=self.device, dtype=self.dtype),
+                )
                 m = m * group["beta1"] + (1 - group["beta1"]) * g
                 state["m"] = m
 
-                v = get_or_init_state(state, "v", lambda: torch.zeros(*g.shape))
+                v = get_or_init_state(
+                    state,
+                    "v",
+                    lambda: torch.zeros(*g.shape, device=self.device, dtype=self.dtype),
+                )
                 v = v * group["beta2"] + (1 - group["beta2"]) * g * g
                 state["v"] = v
 
@@ -788,3 +800,64 @@ def gradient_clipping(
         for param in params:
             if param.grad is not None:
                 param.grad.mul_(clip_coeff)
+
+
+class TransformerModel(torch.nn.Module):
+    def __init__(
+        self,
+        n_layers: int,
+        d_model: int,
+        vocab_size: int,
+        num_heads: int,
+        d_ff: int,
+        context_length: int,
+        theta: float,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        super().__init__()
+        self.embedding_layer = EmbeddingModule(
+            num_embeddings=vocab_size, embedding_dim=d_model, device=device, dtype=dtype
+        )
+        self.transformer_blocks = [
+            TransformerBlock(
+                d_model=d_model,
+                num_heads=num_heads,
+                d_ff=d_ff,
+                max_seq_len=context_length,
+                theta=theta,
+                device=device,
+                dtype=dtype,
+            )
+            for _ in range(n_layers)
+        ]
+        self.rms = RMSNormModule(d_model, device=device, dtype=dtype)
+        self.linear = LinearModule(d_model, vocab_size, device=device, dtype=dtype)
+
+    def forward(self, x: Int[Tensor, "... seq_len"]) -> Float[Tensor, "... vocab_size"]:
+        # Embedding coversion. Essentially converts human
+        # language tokens (1 dimension) into higher dimensional
+        # space (d_model)
+        # ... -> ... d_model
+        embeddings = self.embedding_layer.forward(x)
+
+        # Loop through transformer blocks. All inputs
+        # and all outputs are of the same shape.
+        # ... seq_len d_model -> ... seq_len d_model
+        transformer_output = embeddings
+        for transformer_block in self.transformer_blocks:
+            transformer_output = transformer_block.forward(transformer_output)
+
+        # RMS Normalize the output of transformer
+        # ... seq_len d_model -> ... seq_len d_model
+        rms_norm = self.rms.forward(transformer_output)
+
+        # Linear transformation from d_model to vocab_size
+        # Essentially downcast the high dimensional space (d_model)
+        # back into human language tokens (1 dimension)
+        # ... seq_len d_model -> ... seq_len vocab_size
+        o = self.linear.forward(rms_norm)
+
+        # Final softmax on the predictions
+        # ... seq_len vocab_size -> ... seq_len vocab_size
+        return softmax(o, dim=-1)

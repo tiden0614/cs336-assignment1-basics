@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import torch
 from torch import Tensor
 import numpy as np
@@ -5,6 +6,11 @@ from numpy import typing as npt
 import random
 import os
 import typing
+from pydantic import BaseModel
+import logging
+from typing import List
+import lego
+import time
 
 
 def get_batch(
@@ -50,3 +56,192 @@ def load_checkpoint(
     model.load_state_dict(obj["model"])
     optimizer.load_state_dict(obj["optim"])
     return obj["iter"]
+
+
+class LogInterceptor(logging.Filter):
+    def __init__(self, intercepting_logging_level=logging.DEBUG):
+        super().__init__()
+        self.buffer: List[logging.LogRecord] = []
+        self._flushing = False
+        self.intercepting_logging_level = intercepting_logging_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._flushing:
+            return True
+
+        if record.levelno > self.intercepting_logging_level:
+            self.buffer.append(record)
+            return False
+
+        return True
+
+    def clear(self):
+        self.buffer.clear()
+
+    def flush_to_logger(self, logger: logging.Logger):
+        if not self.buffer:
+            return
+
+        self._flushing = True
+        try:
+            for record in self.buffer:
+                logger.handle(record)
+            self.clear()
+        finally:
+            self._flushing = False
+
+
+class TrainingLoopLoggingManager:
+    def __init__(
+        self,
+        logger_name: str,
+        initial_step: int = 1,
+        every_n_flush: int = 10,
+    ):
+        self.current_step = initial_step
+        self.every_n_flush = every_n_flush
+        self.logger = logging.getLogger(logger_name)
+        self.logger.setLevel(logging.INFO)
+        self.scoped_filter = LogInterceptor(logging.DEBUG)
+        self.logger.addFilter(self.scoped_filter)
+
+    @property
+    def log(self):
+        return self.logger
+
+    @contextmanager
+    def step_scope(self):
+        try:
+            yield
+
+            if self.force_flush or (self.current_step - 1) % self.every_n_flush == 0:
+                self.force_flush = False
+                self.scoped_filter.flush_to_logger(self.logger)
+            else:
+                self.scoped_filter.clear()
+        except Exception:
+            print(
+                f"\n--- [CRASH DETECTED AT STEP {self.current_step}] Flushing Debug Logs ---"
+            )
+            self.scoped_filter.flush_to_logger(self.logger)
+            raise
+
+
+class TrainingConfig(BaseModel):
+    name: str
+
+    # Training config
+    total_iterations: int
+    batch_size: int
+
+    # Model config
+    context_length: int
+    n_layers: int
+    d_model: int
+    d_ff: int
+    vocab_size: int
+    num_heads: int
+    theta: float
+    device: torch.device
+    dtype: torch.dtype
+
+    # Optimizer config
+    adamw_alpha: float
+    adamw_beta1: float
+    adamw_beta2: float
+    adamw_eps: float
+    adamw_lambda: float
+    adamw_device: torch.device
+    adamw_dtype: torch.dtype
+
+
+    # Checkpointer config
+    checkpoint_every_n: int
+
+
+class Checkpointer:
+    def __init__(self, name: str, checkpoint_every_n: int):
+        self.name = name
+        self.training_start_time = time.time()
+        self.checkpoint_every_n = checkpoint_every_n
+
+    def get_checkpoint_path(
+        self,
+        step: int,
+    ) -> str | os.PathLike | typing.BinaryIO | typing.IO[bytes]:
+        return (
+            "/tmp"
+            / "cs336_llm_checkpoints"
+            / self.name
+            / f"{self.training_start_time}"
+            / step
+            / "obj"
+        )
+
+    def should_checkpoint(self, step):
+        return step % self.checkpoint_every_n == 0
+
+
+def training_loop(
+    dataset_source: npt.NDArray | os.PathLike,
+    training_config: TrainingConfig,
+):
+    tlm = TrainingLoopLoggingManager("training_loop", initial_step=1, every_n_flush=10)
+    tlm.log.info(f"Initializing training loop with TrainingConfig {training_config}")
+
+    model = lego.TransformerModel(
+        n_layers=training_config.n_layers,
+        d_model=training_config.d_model,
+        vocab_size=training_config.vocab_size,
+        num_heads=training_config.num_heads,
+        d_ff=training_config.d_ff,
+        context_length=training_config.context_length,
+        theta=training_config.theta,
+        device=training_config.device,
+        dtype=training_config.dtype,
+    )
+
+    optimizer = lego.AdamWOptimizer(
+        params=model.parameters,
+        alpha=training_config.adamw_alpha,
+        beta1=training_config.adamw_beta1,
+        beta2=training_config.adamw_beta2,
+        epsilon=training_config.adamw_eps,
+        lambda_=training_config.adamw_lambda,
+        device=training_config.adamw_device,
+        dtype=training_config.adamw_dtype,
+    )
+
+    checkpointer = Checkpointer(
+        name=training_config.name, checkpoint_every_n=training_config.checkpoint_every_n
+    )
+
+    for step in range(1, training_config.total_iterations + 1):
+        with tlm.step_scope():
+            tlm.log.debug(f"Step {step}: Initializing grad in optim.")
+            optimizer.zero_grad()
+
+            tlm.log.debug(f"Step {step}: Sampling a batch of data.")
+            sample_tensor, ground_truth_tensor = get_batch(
+                dataset_source,
+                device="cuda:0",
+                batch_size=training_config.batch_size,
+                context_length=training_config.context_length,
+            )
+
+            tlm.log.debug(f"Step {step}: Running forward pass.")
+            predictions = model.forward(sample_tensor)
+            loss = lego.cross_entropy(predictions, ground_truth_tensor)
+            tlm.log.debug(f"Step {step}: Loss: {loss}.")
+
+            tlm.log.debug(f"Step {step}: Running backward pass.")
+            loss.backward()
+
+            tlm.log.debug(f"Step {step}: Running optimizer pass.")
+            optimizer.step()
+
+            if checkpointer.should_checkpoint(step):
+                p = checkpointer.get_checkpoint_path(step)
+                tlm.log.info(f"Step {step}: Checkpointing to {p}")
+                save_checkpoint(model, optimizer, step, p)
+                tlm.log.info(f"Step {step}: Finished checkpointing")
