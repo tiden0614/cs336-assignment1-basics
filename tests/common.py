@@ -3,7 +3,22 @@ from __future__ import annotations
 import pathlib
 from functools import lru_cache
 
-FIXTURES_PATH = (pathlib.Path(__file__).resolve().parent) / "fixtures"
+_TEST_DIR = pathlib.Path(__file__).resolve().parent
+FIXTURES_PATH = _TEST_DIR / "fixtures"
+TINY_STORIES_TRAIN = _TEST_DIR.parent / "data" / "TinyStoriesV2-GPT4-train.txt"
+TINY_STORIES_VALID = _TEST_DIR.parent / "data" / "TinyStoriesV2-GPT4-valid.txt"
+TRAINED_BPE_TINY_STORIES_VALID_VOCAB = (
+    FIXTURES_PATH / "train-bpe-tiny-tiny-stories-valid.vocab"
+)
+TRAINED_BPE_TINY_STORIES_VALID_MERGES = (
+    FIXTURES_PATH / "train-bpe-tiny-tiny-stories-valid.merges"
+)
+TRAINED_BPE_TINY_STORIES_TRAIN_VOCAB = (
+    FIXTURES_PATH / "train-bpe-tiny-tiny-stories-train.vocab"
+)
+TRAINED_BPE_TINY_STORIES_TRAIN_MERGES = (
+    FIXTURES_PATH / "train-bpe-tiny-tiny-stories-train.merges"
+)
 
 
 @lru_cache
@@ -36,7 +51,11 @@ def gpt2_bytes_to_unicode() -> dict[int, str]:
     """
     # These 188 integers can used as-is, since they are not whitespace or control characters.
     # See https://www.ssec.wisc.edu/~tomw/java/unicode.html.
-    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
     cs = bs[:]
     # now get the representations of the other 68 integers that do need shifting
     # each will get mapped chr(256 + n), where n will grow from 0...67 in the loop

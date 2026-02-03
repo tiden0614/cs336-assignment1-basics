@@ -9,7 +9,7 @@ import typing
 from pydantic import BaseModel
 import logging
 from typing import List
-import lego
+import cs336_basics.lego as lego
 import time
 
 
@@ -109,6 +109,9 @@ class TrainingLoopLoggingManager:
     def log(self):
         return self.logger
 
+    def set_force_flush(self):
+        self.force_flush = True
+
     @contextmanager
     def step_scope(self):
         try:
@@ -119,12 +122,13 @@ class TrainingLoopLoggingManager:
                 self.scoped_filter.flush_to_logger(self.logger)
             else:
                 self.scoped_filter.clear()
-        except Exception:
+        except Exception as e:
             print(
                 f"\n--- [CRASH DETECTED AT STEP {self.current_step}] Flushing Debug Logs ---"
             )
             self.scoped_filter.flush_to_logger(self.logger)
-            raise
+            self.logger.error(f"Encountered exception in step {self.current_step}: {e}")
+            raise e
 
 
 class TrainingConfig(BaseModel):
@@ -142,8 +146,8 @@ class TrainingConfig(BaseModel):
     vocab_size: int
     num_heads: int
     theta: float
-    device: torch.device
-    dtype: torch.dtype
+    device: str
+    dtype: str
 
     # Optimizer config
     adamw_alpha: float
@@ -151,12 +155,17 @@ class TrainingConfig(BaseModel):
     adamw_beta2: float
     adamw_eps: float
     adamw_lambda: float
-    adamw_device: torch.device
-    adamw_dtype: torch.dtype
-
+    adamw_device: str
+    adamw_dtype: str
 
     # Checkpointer config
     checkpoint_every_n: int
+
+    # Logging config
+    log_every_n_steps: int = 10
+
+    # Test config
+    test_single_sample_overfit: bool = False
 
 
 class Checkpointer:
@@ -186,7 +195,9 @@ def training_loop(
     dataset_source: npt.NDArray | os.PathLike,
     training_config: TrainingConfig,
 ):
-    tlm = TrainingLoopLoggingManager("training_loop", initial_step=1, every_n_flush=10)
+    tlm = TrainingLoopLoggingManager(
+        "training_loop", initial_step=1, every_n_flush=training_config.log_every_n_steps
+    )
     tlm.log.info(f"Initializing training loop with TrainingConfig {training_config}")
 
     model = lego.TransformerModel(
@@ -216,18 +227,22 @@ def training_loop(
         name=training_config.name, checkpoint_every_n=training_config.checkpoint_every_n
     )
 
+    sample_tensor, ground_truth_tensor = None, None
+
     for step in range(1, training_config.total_iterations + 1):
         with tlm.step_scope():
             tlm.log.debug(f"Step {step}: Initializing grad in optim.")
             optimizer.zero_grad()
 
             tlm.log.debug(f"Step {step}: Sampling a batch of data.")
-            sample_tensor, ground_truth_tensor = get_batch(
-                dataset_source,
-                device="cuda:0",
-                batch_size=training_config.batch_size,
-                context_length=training_config.context_length,
-            )
+
+            if sample_tensor is None or not training_config.test_single_sample_overfit:
+                sample_tensor, ground_truth_tensor = get_batch(
+                    dataset_source,
+                    device=training_config.device,
+                    batch_size=training_config.batch_size,
+                    context_length=training_config.context_length,
+                )
 
             tlm.log.debug(f"Step {step}: Running forward pass.")
             predictions = model.forward(sample_tensor)
