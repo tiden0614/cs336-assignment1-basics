@@ -69,7 +69,7 @@ class LogInterceptor(logging.Filter):
         if self._flushing:
             return True
 
-        if record.levelno > self.intercepting_logging_level:
+        if record.levelno <= self.intercepting_logging_level:
             self.buffer.append(record)
             return False
 
@@ -85,6 +85,9 @@ class LogInterceptor(logging.Filter):
         self._flushing = True
         try:
             for record in self.buffer:
+                # Set the record level to INFO
+                record.levelno = 20
+                record.levelname = "INFO"
                 logger.handle(record)
             self.clear()
         finally:
@@ -95,15 +98,14 @@ class TrainingLoopLoggingManager:
     def __init__(
         self,
         logger_name: str,
-        initial_step: int = 1,
         every_n_flush: int = 10,
     ):
-        self.current_step = initial_step
         self.every_n_flush = every_n_flush
         self.logger = logging.getLogger(logger_name)
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.DEBUG)
         self.scoped_filter = LogInterceptor(logging.DEBUG)
         self.logger.addFilter(self.scoped_filter)
+        self.force_flush = False
 
     @property
     def log(self):
@@ -113,11 +115,15 @@ class TrainingLoopLoggingManager:
         self.force_flush = True
 
     @contextmanager
-    def step_scope(self):
+    def step_scope(self, current_step):
         try:
             yield
 
-            if self.force_flush or (self.current_step - 1) % self.every_n_flush == 0:
+            if (
+                self.force_flush
+                or self.every_n_flush <= 1
+                or (current_step - 1) % self.every_n_flush == 0
+            ):
                 self.force_flush = False
                 self.scoped_filter.flush_to_logger(self.logger)
             else:
@@ -196,6 +202,8 @@ DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
     "int64": torch.int64,
 }
+
+
 def parse_tensor_dtype(dtype_str: str) -> torch.dtype:
     return DTYPE_MAP[dtype_str]
 
@@ -205,7 +213,7 @@ def training_loop(
     training_config: TrainingConfig,
 ):
     tlm = TrainingLoopLoggingManager(
-        "training_loop", initial_step=1, every_n_flush=training_config.log_every_n_steps
+        "training_loop", every_n_flush=training_config.log_every_n_steps
     )
     tlm.log.info(f"Initializing training loop with TrainingConfig {training_config}")
 
@@ -224,7 +232,7 @@ def training_loop(
     )
 
     optimizer = lego.AdamWOptimizer(
-        params=model.parameters,
+        params=model.parameters(),
         alpha=training_config.adamw_alpha,
         beta1=training_config.adamw_beta1,
         beta2=training_config.adamw_beta2,
@@ -241,7 +249,7 @@ def training_loop(
     sample_tensor, ground_truth_tensor = None, None
 
     for step in range(1, training_config.total_iterations + 1):
-        with tlm.step_scope():
+        with tlm.step_scope(step):
             tlm.log.debug(f"Step {step}: Initializing grad in optim.")
             optimizer.zero_grad()
 
@@ -271,3 +279,7 @@ def training_loop(
                 tlm.log.info(f"Step {step}: Checkpointing to {p}")
                 save_checkpoint(model, optimizer, step, p)
                 tlm.log.info(f"Step {step}: Finished checkpointing")
+            
+            # Always log the last step
+            if step == training_config.total_iterations:
+                tlm.set_force_flush()

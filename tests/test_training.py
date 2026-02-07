@@ -87,7 +87,7 @@ def test_overfit_one_sample_with_reference_bpe():
         # Checkpointer config
         checkpoint_every_n=100000,  # disabled
         # Logging config
-        log_every_n_steps=1,
+        log_every_n_steps=5,
     )
     training_config.test_single_sample_overfit = True
 

@@ -207,15 +207,17 @@ class RotaryPositionalEmbedding(nn.Module):
         C = torch.cos(theta_grid)
         S = torch.sin(theta_grid)
 
-        self.register_buffer("cos_k", C, persistent=False)
-        self.register_buffer("sin_k", S, persistent=False)
+        self.register_buffer("cos_k", C.to(device=device), persistent=False)
+        self.register_buffer("sin_k", S.to(device=device), persistent=False)
+
+        self.device = device
 
     def _rotate_interleaved(self, x: Float[Tensor, "... d"]) -> Float[Tensor, "... d"]:
         d = x.shape[-1]
         chunked = x.view(*x.shape[:-1], -1, 2)
         swapped = chunked[..., [1, 0]]
         flattened = swapped.flatten(start_dim=-2, end_dim=-1)
-        return flattened * torch.tensor([-1, 1] * (d // 2))
+        return flattened * torch.tensor([-1, 1] * (d // 2), device=self.device)
 
     def forward(
         self,
@@ -454,6 +456,7 @@ class MultiHeadSelfAttentionModule(nn.Module):
         dtype: torch.dtype = None,
     ):
         super().__init__()
+        self.device = device
         assert (
             d_model % num_heads == 0
         ), f"invalid params d_model={d_model} num_heads={num_heads}"
@@ -507,7 +510,9 @@ class MultiHeadSelfAttentionModule(nn.Module):
         )
 
         # Causal masking
-        mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        mask = torch.tril(
+            torch.ones(seq_len, seq_len, dtype=torch.bool, device=self.device)
+        )
 
         # Rearrange the Q, K, V and send them to the attend function
         # Q, K, V = einx.rearrange(
