@@ -1,10 +1,10 @@
 import numpy as np
-import torch
 import cs336_basics.train as train
 import cs336_basics.tokenizer as tok
 from .common import (
     TINY_STORIES_TRAIN,
     TINY_STORIES_VALID,
+    TINY_STORIES_SAMPLE_1,
     TRAINED_BPE_TINY_STORIES_VALID_VOCAB,
     TRAINED_BPE_TINY_STORIES_VALID_MERGES,
     TRAINED_BPE_TINY_STORIES_TRAIN_VOCAB,
@@ -49,13 +49,15 @@ def test_overfit_one_sample_with_reference_bpe():
         TRAINED_BPE_TINY_STORIES_TRAIN_MERGES,
         special_tokens=["<|endoftext|>"],
     )
+
+    print("initialized tok")
     
-    with open(TINY_STORIES_VALID, "rb") as f:
-        data_gen = tokenizer.encode_iterable(f)
-        tokens = [token for token in data_gen]
+    tokens = []
+    with open(TINY_STORIES_SAMPLE_1, "rb") as f:
+        for token in tokenizer.encode_iterable(f):
+            tokens.append(token)
     
     print(len(tokens))
-    print(tokens)
 
     data = np.array(tokens)
 

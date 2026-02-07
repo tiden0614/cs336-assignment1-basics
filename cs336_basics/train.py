@@ -155,7 +155,6 @@ class TrainingConfig(BaseModel):
     adamw_beta2: float
     adamw_eps: float
     adamw_lambda: float
-    adamw_device: str
     adamw_dtype: str
 
     # Checkpointer config
@@ -191,6 +190,16 @@ class Checkpointer:
         return step % self.checkpoint_every_n == 0
 
 
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "int64": torch.int64,
+}
+def parse_tensor_dtype(dtype_str: str) -> torch.dtype:
+    return DTYPE_MAP[dtype_str]
+
+
 def training_loop(
     dataset_source: npt.NDArray | os.PathLike,
     training_config: TrainingConfig,
@@ -200,6 +209,8 @@ def training_loop(
     )
     tlm.log.info(f"Initializing training loop with TrainingConfig {training_config}")
 
+    device = torch.device(training_config.device)
+
     model = lego.TransformerModel(
         n_layers=training_config.n_layers,
         d_model=training_config.d_model,
@@ -208,8 +219,8 @@ def training_loop(
         d_ff=training_config.d_ff,
         context_length=training_config.context_length,
         theta=training_config.theta,
-        device=training_config.device,
-        dtype=training_config.dtype,
+        device=device,
+        dtype=parse_tensor_dtype(training_config.dtype),
     )
 
     optimizer = lego.AdamWOptimizer(
@@ -219,8 +230,8 @@ def training_loop(
         beta2=training_config.adamw_beta2,
         epsilon=training_config.adamw_eps,
         lambda_=training_config.adamw_lambda,
-        device=training_config.adamw_device,
-        dtype=training_config.adamw_dtype,
+        device=device,
+        dtype=parse_tensor_dtype(training_config.adamw_dtype),
     )
 
     checkpointer = Checkpointer(
@@ -239,7 +250,7 @@ def training_loop(
             if sample_tensor is None or not training_config.test_single_sample_overfit:
                 sample_tensor, ground_truth_tensor = get_batch(
                     dataset_source,
-                    device=training_config.device,
+                    device=device,
                     batch_size=training_config.batch_size,
                     context_length=training_config.context_length,
                 )

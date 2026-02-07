@@ -7,6 +7,7 @@ _TEST_DIR = pathlib.Path(__file__).resolve().parent
 FIXTURES_PATH = _TEST_DIR / "fixtures"
 TINY_STORIES_TRAIN = _TEST_DIR.parent / "data" / "TinyStoriesV2-GPT4-train.txt"
 TINY_STORIES_VALID = _TEST_DIR.parent / "data" / "TinyStoriesV2-GPT4-valid.txt"
+TINY_STORIES_SAMPLE_1 = _TEST_DIR.parent / "data" / "TinyStories-Sample-1.txt"
 TRAINED_BPE_TINY_STORIES_VALID_VOCAB = (
     FIXTURES_PATH / "train-bpe-tiny-tiny-stories-valid.vocab"
 )

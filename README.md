@@ -31,9 +31,47 @@ clear && uv run pytest tests/test_train_bpe.py --log-cli-level=INFO -vv 2>&1 | t
 clear && uv run pytest tests/test_tokenizer_internal.py --log-cli-level=INFO -vv
 ```
 
-Initially, all tests should fail with `NotImplementedError`s.
-To connect your implementation to the tests, complete the
-functions in [./tests/adapters.py](./tests/adapters.py).
+### Run UV commands and wait for VS code debugger
+
+First, install debugpy
+```sh
+uv add --dev debugpy
+```
+
+Then, in VS Code, create a "Remote Attach" configuration in launch.json pointing 
+to localhost:5678.
+
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Attach",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}",
+                    "remoteRoot": "."
+                }
+            ],
+            "justMyCode": true
+        }
+    ]
+}
+```
+
+Next, launch the whatever you want to run in terminal
+
+```sh
+uv run python -m debugpy --listen 5678 --wait-for-client -m pytest --log-cli-level=INFO -k test_overfit_one_sample_with_reference_bpe
+```
+
+Finally, attach VS code by running the remote debugger configured.
 
 ### Download data
 Download the TinyStories data and a subsample of OpenWebText

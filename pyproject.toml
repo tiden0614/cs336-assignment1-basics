@@ -14,11 +14,14 @@ dependencies = [
     "regex>=2024.11.6", # more powerful regex than the builtin `re` module
     "submitit>=1.5.2", # job submission for SLURM
     "tiktoken>=0.9.0",
-    "torch~=2.6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "torch~=2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'", # Intel Macs
+    #"torch~=2.6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    #"torch~=2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'", # Intel Macs
     "tqdm>=4.67.1",
     "wandb>=0.19.7",
     "ty>=0.0.1a16",
+    "torch>=2.7.0.dev",
+    "torchvision",
+    "torchaudio",
 ]
 
 [build-system]
@@ -33,6 +36,9 @@ module-root = ""
 package = true
 python-preference = "managed"
 
+[[tool.uv.index]]
+url = "https://download.pytorch.org/"
+
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "WARNING"
@@ -44,6 +50,11 @@ line-length = 120
 [tool.ruff.lint.extend-per-file-ignores]
 # Also ignore `E402` in all `__init__.py` files.
 "__init__.py" = ["E402", "F401", "F403", "E501"]
+
+[dependency-groups]
+dev = [
+    "debugpy>=1.8.20",
+]
 
 [tool.ruff.lint]
 extend-select = ["UP"]
