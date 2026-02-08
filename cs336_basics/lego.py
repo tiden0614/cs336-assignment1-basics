@@ -77,10 +77,9 @@ class RMSNormModule(nn.Module):
 
         # $$ rms = \sqrt{\frac{1}{d_{model}}\sum_{i=1}^{d_{model}}a_i^2 + \epsilon} $$
 
-        rms = (
-            einx.dot("... d_model, ... d_model -> ... 1", x_f32, x_f32) / self.d_model
-            + self.eps
-        ) ** 0.5
+        rms = torch.sqrt(
+            torch.sum(x_f32 * x_f32, dim=-1, keepdim=True) / self.d_model + self.eps
+        )
 
         # $$ RMSNorm(a_i) = \frac{a_i}{RMS(a)}g_i $$
 
