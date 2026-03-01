@@ -50,21 +50,17 @@ def test_overfit_one_sample_with_reference_bpe():
         special_tokens=["<|endoftext|>"],
     )
 
-    print("initialized tok")
-    
     tokens = []
     with open(TINY_STORIES_SAMPLE_1, "rb") as f:
         for token in tokenizer.encode_iterable(f):
             tokens.append(token)
     
-    print(len(tokens))
-
     data = np.array(tokens)
 
     training_config = train.TrainingConfig(
         name="test_overfit_one_sample",
         # Training config
-        total_iterations=10,
+        total_iterations=5000,
         batch_size=1,
         # Model config
         context_length=256,
@@ -87,7 +83,7 @@ def test_overfit_one_sample_with_reference_bpe():
         # Checkpointer config
         checkpoint_every_n=100000,  # disabled
         # Logging config
-        log_every_n_steps=5,
+        log_every_n_steps=100,
     )
     training_config.test_single_sample_overfit = True
 
